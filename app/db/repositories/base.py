@@ -9,9 +9,10 @@ from pydantic import BaseModel as PydanticBaseModel
 from sqlalchemy import Select, select
 from sqlalchemy.orm import Session
 
-from app.db.models.base import BaseModel
+from app.db.models.base import Base, BaseModel, VersionedBaseModel
 
 ModelType = TypeVar("ModelType", bound=BaseModel)
+VersionedModelType = TypeVar("VersionedModelType", bound=VersionedBaseModel)
 CreateSchemaType = TypeVar("CreateSchemaType", bound=PydanticBaseModel)
 UpdateSchemaType = TypeVar("UpdateSchemaType", bound=PydanticBaseModel)
 
@@ -226,3 +227,35 @@ class BaseRepository(Generic[ModelType, CreateSchemaType, UpdateSchemaType]):
             query = query.where(self.model_class.deleted_at.is_(None))
 
         return query
+
+
+class VersionedBaseRepository(
+    BaseRepository[VersionedModelType, CreateSchemaType, UpdateSchemaType]
+):
+    """
+    Base repository for versioned models - adds access to the change history.
+
+    History rows are written automatically (app/db/repositories/versioning.py);
+    this repository only reads them.
+    """
+
+    def get_history(self, id: uuid.UUID) -> List[Base]:
+        """
+        Get every recorded version of a record, oldest first.
+
+        Includes the history of soft-deleted and hard-deleted records.
+
+        Args:
+            id: Primary key of the record
+
+        Returns:
+            List of history instances ordered by version
+        """
+        history_class = self.model_class.__history_class__
+        query = (
+            select(history_class)
+            .where(history_class.id == id)
+            .order_by(history_class.version, history_class.history_id)
+        )
+
+        return list(self.session.scalars(query))

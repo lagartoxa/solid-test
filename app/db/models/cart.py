@@ -10,15 +10,19 @@ from sqlalchemy import CheckConstraint, ForeignKey, Index, Integer, Numeric, Tex
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.constants import CartStatus
-from app.db.models.base import BaseModel
+from app.db.models.base import BaseModel, VersionedBaseModel
 
 if TYPE_CHECKING:
     from app.db.models.product import Product
     from app.db.models.user import User
 
 
-class Cart(BaseModel):
-    """A shopping cart. One cart is active per user at a time."""
+class Cart(VersionedBaseModel):
+    """
+    A shopping cart. One cart is active per user at a time.
+
+    Versioned so every status change is kept in carts_history (for debugging).
+    """
 
     __tablename__ = "carts"
     __table_args__ = (
