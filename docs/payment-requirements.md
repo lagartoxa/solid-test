@@ -21,10 +21,12 @@ Quality bar: no bugs, clean code and naming, DRY, KISS, every line explainable.
 ## 2. API
 - `POST /carts/<cart_id>/payments` starts a payment. It returns **202 Accepted** with the `pending` payment.
   - Header `User-Id` (required) identifies the caller (no underscore: some servers, like nginx and gunicorn, drop headers with underscores). **[README]** In a real system this would be an auth token; here that felt like overkill.
-  - Header `Idempotency-Key`: if the same key is sent again, the first payment is returned and no new one is created.
+  - **No `Idempotency-Key`. [README]** It is not in the task, and duplicate requests (double click, network retry) are already blocked by the "one pending/succeeded payment per cart" rule: a duplicate gets 409 and the client can GET the payment's status, so no double charge is possible. A real system whose clients retry automatically would add an `Idempotency-Key`, so a retry gets the original response instead of 409.
   - Body `payment_method_id` (**required**). **[README]** The API never picks a payment method on its own, because that is too critical; the UI decides which one is sent.
 - `GET /carts/<cart_id>/payments/<payment_id>`: the client polls this for the status.
 - `POST /payments/webhook`: the (mocked) provider reports `succeeded`/`failed`, with the provider transaction id and a failure reason.
+  - **Signed with a shared secret** (HMAC of the body, secret from config); missing or wrong signature → **401**. **[README]**
+  - A notification for a payment that is no longer `pending` (repeated or late) → **409**. **[README]** To evaluate in real life: if providers resend notifications often, answer 200 for a repeated notification with the same status.
 - Everything is documented in Swagger (flask-openapi3 + Pydantic schemas).
 
 ## 3. Business rules (POST)
@@ -40,6 +42,8 @@ Quality bar: no bugs, clean code and naming, DRY, KISS, every line explainable.
 | Products in different currencies | 409 **[README]**: chosen because it doesn't seem to happen in real life (one card charge = one currency), but it would be discussed with the customer first |
 | Not enough stock for any item | 409 |
 | Valid | 202, payment `pending` |
+| Valid, but the provider refuses the charge at the start (e.g. invalid card token) | 402: payment `failed` with the reason, reserved stock given back, cart stays `active` (the user can retry with another method) |
+| Valid, but the provider is unreachable, times out or answers with an error | 502: payment `failed` with the reason, reserved stock given back, cart stays `active` (the user can retry later). 502, not 409: the request and the data were fine, a service we depend on failed |
 
 - **Amount:** the total calculation service (interface + stub) returns line items (`quantity`, `unit_price`). Our code sums them into `amount`. The currency comes from the cart's products.
 - **Stock is reserved at POST:** `stock_quantity` is reduced when the payment starts and given back if the payment fails.
@@ -55,7 +59,7 @@ Quality bar: no bugs, clean code and naming, DRY, KISS, every line explainable.
 - **Logging:** the calls to the payment provider mock and to the total calculation service must go through `action_logger.external_call(...)`, so the payloads sent and received are logged. Data changes go through the repositories, which log them (see the Logging rules in CLAUDE.md).
 
 ## 5. Schema: `payments` table (new Alembic migration)
-`BaseModel` columns (id, created_at, updated_at, deleted_at), plus `cart_id` FK, `user_id` FK, `payment_method_id` FK, `amount NUMERIC(12,2) CHECK > 0`, `currency CHAR(3)`, `status` (`pending`/`succeeded`/`failed`, enum in `app/db/constants`, CHECK constraint), `provider_transaction_id` (nullable), `failure_reason` (nullable), `idempotency_key` (unique). Indexes on `cart_id` and `user_id`, and a partial unique index for one active payment per cart. Model + `PaymentRepository` + schemas, following the CLAUDE.md rules (no SQL outside repositories, nested `with` statements).
+`BaseModel` columns (id, created_at, updated_at, deleted_at), plus `cart_id` FK, `user_id` FK, `payment_method_id` FK, `amount NUMERIC(12,2) CHECK > 0`, `currency CHAR(3)`, `status` (`pending`/`succeeded`/`failed`, enum in `app/db/constants`, CHECK constraint), `provider_transaction_id` (nullable), `failure_reason` (nullable). Indexes on `cart_id` and `user_id`, and a partial unique index for one active payment per cart. Model + `PaymentRepository` + schemas, following the CLAUDE.md rules (no SQL outside repositories, nested `with` statements).
 
 ## 6. Still to discuss
 - **Mock provider rule (Q5):** how the mock decides success or failure and when it calls the webhook. To be settled together with the tests.
@@ -66,10 +70,10 @@ Quality bar: no bugs, clean code and naming, DRY, KISS, every line explainable.
 3. Mock payment provider (after §6).
 4. Payment service: validations → stock reservation → pending payment → provider call; webhook handling.
 5. Endpoints (POST, GET, webhook) with Swagger docs.
-6. Tests for every row of the tables in §3 and §4, plus idempotency and concurrency.
+6. Tests for every row of the tables in §3 and §4, plus duplicate requests and concurrency.
 7. README: endpoint usage and all **[README]** decisions.
 
 ## Verification
 - `alembic upgrade head` + `alembic check` with the payments migration.
-- `pytest`: all §3/§4 cases, idempotency, double payment blocked.
+- `pytest`: all §3/§4 cases, duplicate requests / double payment blocked.
 - Manual check through Swagger at `/docs` with the `flask seed` data (Alice's active cart `c1c1…`, payment method `11111111-2222-3333-4444-555555555555`).
