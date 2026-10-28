@@ -1,0 +1,52 @@
+"""
+Alembic environment.
+
+The database URL comes from the app config (DATABASE_URL), unless the caller
+set sqlalchemy.url on the Alembic config (the tests do, to target shop_test).
+"""
+
+from logging.config import fileConfig
+
+from alembic import context
+from sqlalchemy import create_engine, pool
+
+from app.config import Config
+from app.db.models import Base
+
+config = context.config
+
+if config.config_file_name is not None and config.attributes.get("configure_logger", True):
+    fileConfig(config.config_file_name)
+
+target_metadata = Base.metadata
+database_url = config.get_main_option("sqlalchemy.url") or Config.DATABASE_URL
+
+
+def run_migrations_offline() -> None:
+    """Run migrations in 'offline' mode, emitting SQL to stdout."""
+    context.configure(
+        url=database_url,
+        target_metadata=target_metadata,
+        literal_binds=True,
+        dialect_opts={"paramstyle": "named"},
+    )
+
+    with context.begin_transaction():
+        context.run_migrations()
+
+
+def run_migrations_online() -> None:
+    """Run migrations in 'online' mode, against a live connection."""
+    engine = create_engine(database_url, poolclass=pool.NullPool)
+
+    with engine.connect() as connection:
+        context.configure(connection=connection, target_metadata=target_metadata)
+
+        with context.begin_transaction():
+            context.run_migrations()
+
+
+if context.is_offline_mode():
+    run_migrations_offline()
+else:
+    run_migrations_online()
