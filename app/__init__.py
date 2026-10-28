@@ -7,6 +7,7 @@ from flask_openapi3 import Info, OpenAPI
 from app.cli import register_cli
 from app.config import Config
 from app.db.session import init_db
+from app.log.request_logging import register_request_logging
 
 API_INFO = Info(title="Shop Payments API", version="1.0.0")
 
@@ -28,6 +29,7 @@ def create_app(config: type[Config] = Config) -> OpenAPI:
     app.config.from_object(config)
 
     init_db(app)
+    register_request_logging(app)
     register_cli(app)
     _serve_swagger_on_docs_index(app)
 

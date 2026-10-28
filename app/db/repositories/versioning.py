@@ -13,7 +13,7 @@ versioned tables.
 from sqlalchemy import event, insert
 from sqlalchemy.orm import Session
 
-from app.db.constants import HistoryOperation
+from app.db.constants import ChangeOperation
 from app.db.models.base import VersionedBaseModel
 
 
@@ -27,13 +27,13 @@ def record_history(session: Session, flush_context) -> None:
     session.new / dirty / deleted still list what was flushed.
     """
     changes = [
-        *((instance, HistoryOperation.INSERT) for instance in session.new),
+        *((instance, ChangeOperation.INSERT) for instance in session.new),
         *(
-            (instance, HistoryOperation.UPDATE)
+            (instance, ChangeOperation.UPDATE)
             for instance in session.dirty
             if session.is_modified(instance, include_collections=False)
         ),
-        *((instance, HistoryOperation.DELETE) for instance in session.deleted),
+        *((instance, ChangeOperation.DELETE) for instance in session.deleted),
     ]
 
     for instance, operation in changes:
@@ -42,7 +42,7 @@ def record_history(session: Session, flush_context) -> None:
 
 
 def _insert_snapshot(
-    session: Session, instance: VersionedBaseModel, operation: HistoryOperation
+    session: Session, instance: VersionedBaseModel, operation: ChangeOperation
 ) -> None:
     """
     Insert a copy of the instance's current values into its history table.
@@ -61,7 +61,7 @@ def _insert_snapshot(
 
     # A deleted row's version is not incremented (the row is gone), but the
     # delete is a new event in its history, so it gets the next version.
-    if operation is HistoryOperation.DELETE:
+    if operation is ChangeOperation.DELETE:
         snapshot["version"] += 1
 
     session.connection().execute(

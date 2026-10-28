@@ -6,6 +6,7 @@ from sqlalchemy.orm import configure_mappers
 
 from app.db.models.base import Base, BaseModel, VersionedBaseModel
 from app.db.models.cart import Cart, CartItem
+from app.db.models.log import Log
 from app.db.models.product import Product
 from app.db.models.user import User
 from app.db.models.user_payment_method import UserPaymentMethod
@@ -25,5 +26,6 @@ __all__ = [
     "Cart",
     "CartHistory",
     "CartItem",
+    "Log",
     "UserPaymentMethod",
 ]

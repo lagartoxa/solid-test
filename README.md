@@ -20,6 +20,7 @@ app/
 ├── __init__.py          # create_app() factory
 ├── config.py            # settings from environment variables (.env)
 ├── cli.py               # `flask seed` command
+├── log/                 # action logger (singleton) and API request logging
 ├── db/
 │   ├── session.py       # engine and one session per request
 │   ├── constants/       # enums used by the models (e.g. CartStatus)
@@ -99,11 +100,28 @@ The tests use the `shop_test` database. They apply the Alembic migrations at the
   - The `version` column is also used for optimistic locking: updating a row that another request changed in the meantime raises an error instead of silently overwriting that change.
   - History is written by SQLAlchemy session events, so only changes made through ORM objects (as the repositories do) are recorded. Bulk `UPDATE` statements skip it and must not be used on versioned tables.
   - History is read with `get_history(id)` on the repository (`VersionedBaseRepository`).
+- **Action log.** Every action done by the API is saved in the `logs` table. **The goal is to track errors later.**
+  - What is logged:
+    - every API request with its headers, query string and body, plus the response status and body, the error traceback (if any) and the duration;
+    - every database change, with the values before and after;
+    - every call to an external service (payment provider, total calculation service), with the payloads sent and received.
+  - Every request gets an id. It is saved on all the logs of that request and returned in the `X-Request-ID` response header.
+  - Unexpected errors return 500 with `{"error": "An unexpected error happened. Log id: <request_id>/<log_id>", "request_id": ..., "log_id": ...}`. The request id finds every log of the request (its database changes and external calls); the log id finds the exact log row with the traceback. **Both ids are given to make debugging easier**: the support team can trace the error from what the user reports.
+  - The caller's user id comes in the `User-Id` header and is saved on every log of the request. The header has no underscore because some servers (nginx, gunicorn) drop headers with underscores.
+  - API requests and external calls are saved in their own transaction, so they are kept even when the request fails and rolls back, which is when they are needed. Database changes are logged in the same transaction as the change, so a rolled-back change leaves no log of a change that never happened.
+  - Sensitive values (card tokens, passwords, authorization headers, ...) are replaced with `***` before saving.
+  - The logger is a singleton (`ActionLogger` in [app/log/action_logger.py](app/log/action_logger.py)), so the whole app writes logs the same way.
+  - Database changes are logged by explicit calls in the repositories (`BaseRepository` does it for create, update, delete and restore), not by an automatic listener.
+  - The Swagger pages (`/docs`) are not logged; they are not API actions.
+  - If a log can't be saved, the request still works and the failure goes to the Python logger.
+  - The `logs` table is append-only, so it doesn't inherit `BaseModel` (no `updated_at` or soft delete), like the `*_history` tables.
 - **Idempotent seed.** Every sample record has a fixed id (the ids from `quick-start.sql`, plus fixed ids for the cart items, which had none). Before inserting a record, the seed checks if its id already exists, including soft-deleted rows, and skips it. Running the seed again never creates duplicates or fails.
 - **Enums in `db/constants`.** Enums such as `CartStatus` are in [app/db/constants/](app/db/constants/), not in the model files. Models, schemas and the future services import them from one place.
 - **API docs with Swagger.** The app is built with `flask-openapi3`, a Flask subclass that creates the OpenAPI spec from the routes and their Pydantic schemas, so the docs always match the code. Swagger UI is served at `/docs`.
 - **Requirements split.** `requirements/base.txt` has what the app needs to run. `requirements/dev.txt` adds the test tools.
 - **Tests.** The tests use a real PostgreSQL database instead of SQLite, because the schema uses PostgreSQL features (UUID generation, partial indexes).
+- **Commit messages as versioning documents.** Every commit message is written so it can be reused later in a versioning document (changelog / release notes): a short imperative subject line saying what changed, and a body with what changed and why, the schema or user-visible impact, and any new migration, config or dependency. The tests must all pass before a commit is made.
+- **Instructions file for the AI agent.** Since I used Claude for this task, I wrote the project rules in [CLAUDE.md](CLAUDE.md), a file that Claude Code loads automatically in every session, so all new code follows the same rules: commit only when asked, run the tests and get my approval of the commit message before committing, no SQL outside repositories (nested `with` statements when more than one repository is needed), how to use versioned tables, ask instead of assuming on ambiguous instructions, and follow DRY and KISS.
 
 ## My Assumptions
 

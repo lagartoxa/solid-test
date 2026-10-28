@@ -6,7 +6,7 @@ import pytest
 from sqlalchemy import update
 from sqlalchemy.orm.exc import StaleDataError
 
-from app.db.constants import CartStatus, HistoryOperation
+from app.db.constants import CartStatus, ChangeOperation
 from app.db.models import Base, Cart, CartHistory, User
 from app.db.repositories import CartRepository, UserRepository
 from app.schemas import CartCreate, CartUpdate, UserCreate
@@ -33,7 +33,7 @@ def test_insert_writes_version_1(db_session, cart):
     history = history_of(db_session, cart.id)
 
     assert [(h.version, h.operation, h.status) for h in history] == [
-        (1, HistoryOperation.INSERT.value, CartStatus.ACTIVE.value)
+        (1, ChangeOperation.INSERT.value, CartStatus.ACTIVE.value)
     ]
     assert history[0].user_id == cart.user_id
     assert history[0].changed_at is not None
@@ -47,8 +47,8 @@ def test_status_change_writes_new_version(db_session, cart):
 
     assert updated.version == 2
     assert [(h.version, h.operation, h.status) for h in history] == [
-        (1, HistoryOperation.INSERT.value, CartStatus.ACTIVE.value),
-        (2, HistoryOperation.UPDATE.value, CartStatus.CHECKED_OUT.value),
+        (1, ChangeOperation.INSERT.value, CartStatus.ACTIVE.value),
+        (2, ChangeOperation.UPDATE.value, CartStatus.CHECKED_OUT.value),
     ]
 
 
@@ -68,9 +68,9 @@ def test_soft_delete_and_restore_are_recorded_as_updates(db_session, cart):
     history = history_of(db_session, cart.id)
 
     assert [(h.version, h.operation) for h in history] == [
-        (1, HistoryOperation.INSERT.value),
-        (2, HistoryOperation.UPDATE.value),
-        (3, HistoryOperation.UPDATE.value),
+        (1, ChangeOperation.INSERT.value),
+        (2, ChangeOperation.UPDATE.value),
+        (3, ChangeOperation.UPDATE.value),
     ]
     assert history[1].deleted_at is not None
     assert history[2].deleted_at is None
@@ -82,7 +82,7 @@ def test_hard_delete_is_recorded(db_session, cart):
 
     history = history_of(db_session, cart.id)
 
-    assert history[-1].operation == HistoryOperation.DELETE.value
+    assert history[-1].operation == ChangeOperation.DELETE.value
     assert history[-1].version == 2
 
 

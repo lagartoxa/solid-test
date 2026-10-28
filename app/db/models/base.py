@@ -25,11 +25,12 @@ from sqlalchemy import (
     UniqueConstraint,
     Uuid,
     func,
+    inspect,
 )
 from sqlalchemy.ext.hybrid import hybrid_property
 from sqlalchemy.orm import DeclarativeBase, Mapped, declared_attr, mapped_column
 
-from app.db.constants import HistoryOperation
+from app.db.constants import ChangeOperation
 
 # Columns of a versioned table that are not copied to its history table:
 # changed_at in the history row already says when the change happened.
@@ -38,6 +39,18 @@ HISTORY_EXCLUDED_COLUMNS = {"created_at", "updated_at"}
 
 class Base(DeclarativeBase):
     """Base class for all models using SQLAlchemy 2.0 declarative base."""
+
+    def column_values(self) -> dict:
+        """
+        Current values of the mapped columns, keyed by attribute name.
+
+        Returns:
+            Dict of column values
+        """
+        return {
+            attribute.key: getattr(self, attribute.key)
+            for attribute in inspect(self).mapper.column_attrs
+        }
 
 
 class TimestampMixin:
@@ -186,7 +199,7 @@ def _create_history_class(model: type[VersionedBaseModel]) -> type[Base]:
         History ORM class
     """
     table_name = f"{model.__tablename__}_history"
-    operations = ", ".join(f"'{operation.value}'" for operation in HistoryOperation)
+    operations = ", ".join(f"'{operation.value}'" for operation in ChangeOperation)
 
     copied_columns = [
         Column(column.name, column.type, nullable=column.nullable)

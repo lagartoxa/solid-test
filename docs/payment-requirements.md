@@ -20,7 +20,7 @@ Quality bar: no bugs, clean code and naming, DRY, KISS, every line explainable.
 
 ## 2. API
 - `POST /carts/<cart_id>/payments` starts a payment. It returns **202 Accepted** with the `pending` payment.
-  - Header `user_id` (required) identifies the caller. **[README]** In a real system this would be an auth token; here that felt like overkill.
+  - Header `User-Id` (required) identifies the caller (no underscore: some servers, like nginx and gunicorn, drop headers with underscores). **[README]** In a real system this would be an auth token; here that felt like overkill.
   - Header `Idempotency-Key`: if the same key is sent again, the first payment is returned and no new one is created.
   - Body `payment_method_id` (**required**). **[README]** The API never picks a payment method on its own, because that is too critical; the UI decides which one is sent.
 - `GET /carts/<cart_id>/payments/<payment_id>`: the client polls this for the status.
@@ -51,6 +51,8 @@ Quality bar: no bugs, clean code and naming, DRY, KISS, every line explainable.
 - Only a `pending` payment can change status.
 
 - **Cart history:** `carts` is versioned (see [versioned-tables-plan.md](versioned-tables-plan.md)), so every status change made by the payment flow is recorded automatically. Concurrent updates of the same cart raise `StaleDataError`, which the payment flow must handle (on top of the row lock).
+
+- **Logging:** the calls to the payment provider mock and to the total calculation service must go through `action_logger.external_call(...)`, so the payloads sent and received are logged. Data changes go through the repositories, which log them (see the Logging rules in CLAUDE.md).
 
 ## 5. Schema: `payments` table (new Alembic migration)
 `BaseModel` columns (id, created_at, updated_at, deleted_at), plus `cart_id` FK, `user_id` FK, `payment_method_id` FK, `amount NUMERIC(12,2) CHECK > 0`, `currency CHAR(3)`, `status` (`pending`/`succeeded`/`failed`, enum in `app/db/constants`, CHECK constraint), `provider_transaction_id` (nullable), `failure_reason` (nullable), `idempotency_key` (unique). Indexes on `cart_id` and `user_id`, and a partial unique index for one active payment per cart. Model + `PaymentRepository` + schemas, following the CLAUDE.md rules (no SQL outside repositories, nested `with` statements).

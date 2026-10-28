@@ -9,8 +9,10 @@ import click
 from flask import Flask
 from flask.cli import with_appcontext
 
+from app.db.constants import ChangeOperation
 from app.db.models import BaseModel, Cart, CartItem, Product, User, UserPaymentMethod
 from app.db.session import get_session
+from app.log.action_logger import action_logger
 
 ALICE_ID = uuid.UUID("11111111-1111-1111-1111-111111111111")
 BOB_ID = uuid.UUID("22222222-2222-2222-2222-222222222222")
@@ -68,7 +70,11 @@ def sample_data() -> list[BaseModel]:
 @click.command("seed")
 @with_appcontext
 def seed() -> None:
-    """Insert the sample data from quick-start.sql, skipping records that already exist."""
+    """
+    Insert the sample data from quick-start.sql, skipping records that already exist.
+
+    Each insert is logged, like the changes made by the repositories.
+    """
     session = get_session()
     records = sample_data()
     inserted = 0
@@ -78,6 +84,15 @@ def seed() -> None:
         if session.get(type(record), record.id) is None:
             session.add(record)
             session.flush()
+            session.add(
+                action_logger.db_change_entry(
+                    record.__tablename__,
+                    record.id,
+                    ChangeOperation.INSERT,
+                    before=None,
+                    after=record.column_values(),
+                )
+            )
             inserted += 1
 
     session.commit()

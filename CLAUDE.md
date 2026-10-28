@@ -35,6 +35,14 @@ These rules apply to every change in this repository. See [README.md](README.md)
 - Never change a versioned table with bulk statements (`session.execute(update(...))` / `delete(...)`): they skip the history. Always change ORM instances through the repository.
 - Handle `StaleDataError` where a concurrent update of a versioned record is possible; never work around it by overwriting.
 
+## Logging
+
+- The goal of the `logs` table is to track errors later. Only use the `action_logger` singleton ([app/log/action_logger.py](app/log/action_logger.py)); never create another logger or write `Log` rows directly.
+- Log EVERY database change. Repository methods that change data must call `self._log_change(...)` (`BaseRepository`'s create/update/delete/restore already do), so the log is saved in the same transaction as the change. Code outside repositories that changes data (only `flask seed`) adds `action_logger.db_change_entry(...)` itself.
+- Log every call to an external service (payment provider, total calculation service, ...) with `action_logger.external_call(...)`, including the payloads sent and received.
+- API requests and responses are logged automatically ([app/log/request_logging.py](app/log/request_logging.py)); don't add manual API logs.
+- Never log sensitive data unmasked: add new sensitive keys to `SENSITIVE_KEYS` ([app/db/constants/sensitive_keys.py](app/db/constants/sensitive_keys.py)).
+
 ## Ambiguity
 
 - Don't assume. When an instruction is ambiguous or leaves a decision open, ask before deciding.
