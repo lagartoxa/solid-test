@@ -179,6 +179,29 @@ curl -i -X POST http://localhost:5000/payments/webhook \
 
 The signature covers the exact body: recompute `SIGNATURE` every time `BODY` changes.
 
+## Reading the logs
+
+Every request, database change and call to the payment provider is saved in the logs. Two endpoints read them:
+
+| Call | What it returns |
+|---|---|
+| `GET /logs/{log_id}` | one log entry |
+| `GET /logs?request_id=<X-Request-ID>` | every log of one request: the API call, its database changes and its external calls |
+| `GET /logs?record_id=<id>` | every change of one record, e.g. a payment id |
+| `GET /logs?action=api_request&status_code=409` | every request that ended in 409 |
+| `GET /logs?user_id=<User-Id>` | the requests of one user |
+
+Filters can be combined; results are newest first, 50 per page (`limit` up to 200, `offset` for the next pages).
+
+To try it in Swagger:
+
+1. Run any test above, e.g. Dave's [empty cart](#edge-cases-start-a-payment) (409 `cart_empty`), and copy the `x-request-id` from the response headers.
+2. `GET /logs` with `request_id` set to that id. Expected: **200** with the request's log: method and path, the headers and body received (card tokens masked as `***`), the response `{"error": "cart_empty", ...}`, the status code and the duration.
+3. Start a payment that is accepted (e.g. with Carol's declined card: 202, it only fails later), copy its `id`, then `GET /logs` with `record_id` set to it. Expected: the payment's `insert` and `update`, with the values before and after.
+4. `GET /logs/{log_id}` with the `id` of any entry from the steps above. Expected: **200** with that entry. With an unknown id: **404** `log_not_found`; with an id that isn't a UUID: **422**.
+
+> Calls to the log endpoints are logged as well, but their successful responses are saved as a summary (`{"returned": ..., "total": ...}`), not as the logs they returned.
+
 ## Start over
 
 The happy path checks out Alice's cart. To run it again, clear the database and insert the sample data again (this deletes all data, including the logs):
@@ -189,4 +212,4 @@ The happy path checks out Alice's cart. To run it again, clear the database and 
 
 ## Where to look
 
-Every request is saved in the `logs` table, with the same id as the `X-Request-ID` response header. That includes its database changes and its calls to the payment provider, and every edge case is logged with its error code. Every payment and cart status change is kept in `payments_history` and `carts_history`.
+Every request is saved in the `logs` table (readable with `GET /logs`, see [Reading the logs](#reading-the-logs)), with the same id as the `X-Request-ID` response header. That includes its database changes and its calls to the payment provider, and every edge case is logged with its error code. Every payment and cart status change is kept in `payments_history` and `carts_history`.

@@ -21,6 +21,10 @@ UNEXPECTED_ERROR_MESSAGE = "An unexpected error happened. Log id: {request_id}/{
 # The Swagger pages and assets are not API actions.
 NOT_LOGGED_PATH_PREFIXES = ("/docs",)
 
+# Successful responses of these paths are logged as a summary: they contain
+# logs, and saving them would copy log rows into new log rows on every call.
+SUMMARIZED_PATH_PREFIXES = ("/logs",)
+
 
 def register_request_logging(app: Flask) -> None:
     """Register the hooks that log every request on the app."""
@@ -73,7 +77,7 @@ def log_request(response: Response) -> Response:
                 "body": _request_body(),
             },
             status_code=response.status_code,
-            response_payload=_response_body(response),
+            response_payload=_logged_response_body(response),
             error=g.get("request_error"),
             duration_ms=elapsed_ms(g.request_started_at),
             log_id=g.get("api_log_id"),
@@ -90,6 +94,19 @@ def _request_body() -> Any:
         body = request.get_data(as_text=True) or None
 
     return body
+
+
+def _logged_response_body(response: Response) -> Any:
+    """The response body to log: the body itself, or a summary for the log endpoints."""
+    body = _response_body(response)
+
+    if not request.path.startswith(SUMMARIZED_PATH_PREFIXES) or response.status_code >= 400:
+        return body
+
+    if "items" in body:
+        return {"returned": len(body["items"]), "total": body["total"]}
+
+    return {"log_id": body["id"]}
 
 
 def _response_body(response: Response) -> Any:

@@ -14,6 +14,7 @@ class ErrorCode(str, Enum):
     USER_NOT_FOUND = "user_not_found"
     CART_NOT_FOUND = "cart_not_found"
     PAYMENT_NOT_FOUND = "payment_not_found"
+    LOG_NOT_FOUND = "log_not_found"
     CART_NOT_ACTIVE = "cart_not_active"
     ACTIVE_PAYMENT_EXISTS = "active_payment_exists"
     NO_PAYMENT_METHOD = "no_payment_method"
