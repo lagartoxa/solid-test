@@ -75,6 +75,212 @@ About the traceability, it would be better to save every change with the user th
 - **Commit messages as versioning documents.** Every commit message is written so it can be reused later in a versioning document (changelog / release notes): a short imperative subject line saying what changed, and a body with what changed and why, the schema or user-visible impact, and any new migration, config or dependency. The tests must all pass before a commit is made.
 - **Instructions file for the AI agent.** Since I used Claude for this task, I wrote the project rules in [CLAUDE.md](CLAUDE.md), a file that Claude Code loads automatically in every session, so all new code follows the same rules: commit only when asked, run the tests and get my approval of the commit message before committing, no SQL outside repositories (nested `with` statements when more than one repository is needed), how to use versioned tables, ask instead of assuming on ambiguous instructions, and follow DRY and KISS.
 
+## Flowcharts
+
+Maybe an overkill, but I like to draw them to better visualize the edge cases.
+
+The payment flows were drawn with PlantUML before the code was written, to agree on every path and edge case first; the implementation and the tests follow them step by step. The files are in [docs/diagrams/](docs/diagrams/). To view them, use a PlantUML viewer, e.g. the PlantUML extension of VS Code or the online editor at plantuml.com.
+
+All of them are flowcharts read top to bottom: diamonds are decisions, every path ends in an HTTP response, green boxes are successful responses and pink boxes are errors. The legend at the bottom covers the cases that can happen at any step.
+
+| Diagram | What it shows | Goal |
+|---|---|---|
+| [01-payment-overview](docs/diagrams/01-payment-overview.puml) | The whole life of a payment in three lanes (client, API, payment provider): the client starts the payment, the API reserves the stock and starts the charge, the client polls the status, the provider reports the result through the webhook, and the client shows the confirmation or lets the user retry. Includes the provider refusing or failing when the charge starts. | The big picture: who does what, and when, in an asynchronous payment. The other three diagrams zoom into each endpoint it uses. |
+| [02-start-payment](docs/diagrams/02-start-payment.puml) | `POST /carts/{cart_id}/payments`: every check in the order the API runs it (input, user and cart, cart status, existing payment, payment method, line items, currencies, stock), each with its error response; then the stock reservation, the pending payment and the provider's three answers (accepted → 202, refused → 402, unavailable → 502). | Define every edge case of starting a payment and which one wins when several apply, since the first failing check decides the response. |
+| [03-payment-webhook](docs/diagrams/03-payment-webhook.puml) | `POST /payments/webhook`: the signature check (401), the body validation (422), the payment lookup (404), a payment that is no longer pending (409), and the two results: succeeded (payment succeeded, cart checked out) or failed (payment failed, stock given back, cart still active). | Make sure only the provider can change a payment, and that a repeated or late notification can't change a finished one. |
+| [04-get-payment-status](docs/diagrams/04-get-payment-status.puml) | `GET /carts/{cart_id}/payments/{payment_id}`: input validation (422), the cart must exist and belong to the user (404), the payment must belong to the cart (404), then 200 with the status. | Show how the client follows a payment while it waits for the result, without seeing other users' carts or payments. |
+
+## Automated tests
+
+Run them with `./dev.sh test` (see [How to test](#how-to-test)). They run against a real PostgreSQL database migrated with Alembic, and each test is rolled back at the end. Every edge case test checks the HTTP status, the error code, the data changes and the logs. Tests marked *(parametrized)* run once per case listed.
+
+### Start a payment
+
+[tests/integration/api/test_start_payment.py](tests/integration/api/test_start_payment.py): `POST /carts/{cart_id}/payments` (diagram 02).
+
+| Test | What it tests |
+|---|---|
+| `test_payment_starts_with_credit_and_debit` | With a credit and with a debit card: 202, payment `pending` with the right amount, currency, type and transaction id; stock reserved; cart still `active`; API call, total-service call, provider call and data changes logged. *(parametrized)* |
+| `test_provider_token_is_masked_in_the_logs` | The card token sent to the provider is saved as `***` in the logs. |
+| `test_cart_can_be_paid_again_after_a_failed_payment` | A failed payment doesn't block a new payment of the same cart. |
+| `test_provider_failure_fails_the_payment_and_gives_stock_back` | Refused card → 402 `payment_refused`, provider unavailable → 502 `provider_unavailable`: payment `failed` with the reason, stock given back, cart `active`, provider call logged with the error. *(parametrized)* |
+| `test_unexpected_provider_error_is_a_provider_failure` | Any other provider error (e.g. connection reset) → 502, payment failed, stock given back: a payment never stays pending with stock reserved. |
+| `test_missing_user_id_header` | No `User-Id` header → 422. |
+| `test_invalid_user_id_header` | `User-Id` that isn't a UUID → 422. |
+| `test_invalid_cart_id` | `cart_id` that isn't a UUID → 422. |
+| `test_invalid_payment_method_id` | `payment_method_id` that isn't a UUID → 422. |
+| `test_missing_payment_method_id` | Body without `payment_method_id` → 422. |
+| `test_unknown_user` | Unknown user → 404 `user_not_found`. |
+| `test_deleted_user` | Soft-deleted user → 404 `user_not_found`. |
+| `test_unknown_cart` | Unknown cart → 404 `cart_not_found`. |
+| `test_deleted_cart` | Soft-deleted cart → 404 `cart_not_found`. |
+| `test_cart_of_another_user` | Another user's cart → 404 `cart_not_found`. |
+| `test_cart_not_active` | Cart `checked_out` or `abandoned` → 409 `cart_not_active`. *(parametrized)* |
+| `test_cart_with_active_payment` | Cart with a `pending` or `succeeded` payment → 409 `active_payment_exists`. *(parametrized)* |
+| `test_duplicate_request_does_not_charge_twice` | The same request sent twice: the second gets 409 and only one payment exists. |
+| `test_user_without_payment_methods` | User without payment methods → 409 `no_payment_method`. |
+| `test_unknown_payment_method` | Unknown payment method → 409 `payment_method_not_found`. |
+| `test_deleted_payment_method` | Soft-deleted payment method → 409 `payment_method_not_found`. |
+| `test_payment_method_of_another_user` | Another user's payment method → 409 `payment_method_not_found`. |
+| `test_empty_cart` | Empty cart → 409 `cart_empty`. |
+| `test_deleted_product_in_cart` | Cart with a soft-deleted product → 409 `product_unavailable`. |
+| `test_mixed_currencies` | Products in USD and EUR → 409 `mixed_currencies`. |
+| `test_insufficient_stock` | More items than in stock → 409 `insufficient_stock`, stock unchanged. |
+| `test_insufficient_stock_counts_repeated_products` | The same product in two items is added up before checking the stock. |
+| `test_rejected_request_changes_nothing` | A rejected request creates no payment, doesn't touch the stock and logs no data change. |
+| `test_concurrent_change_of_the_cart` | Another request changed the cart at the same time (`StaleDataError`) → 409 `concurrent_update`. |
+| `test_concurrent_payment_of_the_same_cart` | Two requests created a payment for the same cart at the same time (unique index) → 409 `active_payment_exists`. |
+| `test_database_allows_only_one_active_payment_per_cart` | The database itself rejects a second pending/succeeded payment for a cart. |
+
+### Payment webhook
+
+[tests/integration/api/test_payment_webhook.py](tests/integration/api/test_payment_webhook.py): `POST /payments/webhook` (diagram 03).
+
+| Test | What it tests |
+|---|---|
+| `test_succeeded_checks_out_the_cart` | `succeeded`: payment `succeeded` with the transaction id, cart `checked_out`, stock stays sold, changes recorded in `carts_history` and `payments_history`. |
+| `test_failed_gives_stock_back_and_keeps_cart_active` | `failed`: payment `failed` with the reason, stock given back, cart `active`. |
+| `test_missing_signature` | No signature → 401 `invalid_signature`, payment unchanged. |
+| `test_wrong_signature` | Wrong signature → 401 `invalid_signature`. |
+| `test_signature_is_checked_before_the_body` | An unsigned call with an invalid body gets 401, not 422: nothing is processed before the signature. |
+| `test_invalid_body` | Invalid body → 422. |
+| `test_unknown_status` | Status other than succeeded/failed → 422. |
+| `test_failed_without_reason` | `failed` without `failure_reason` → 422. |
+| `test_unknown_payment` | Unknown payment → 404 `payment_not_found`. |
+| `test_payment_not_pending` | Repeated or late notification for a finished payment (succeeded twice, failed after succeeded, succeeded after failed) → 409 `payment_not_pending`, payment unchanged. *(parametrized)* |
+| `test_concurrent_change` | Another request changed the payment at the same time → 409 `concurrent_update`. |
+
+### Payment status
+
+[tests/integration/api/test_get_payment.py](tests/integration/api/test_get_payment.py): `GET /carts/{cart_id}/payments/{payment_id}` (diagram 04).
+
+| Test | What it tests |
+|---|---|
+| `test_returns_the_payment` | 200 with the payment and its status. |
+| `test_invalid_ids` | `cart_id`, `payment_id` or `User-Id` that isn't a UUID → 422. |
+| `test_unknown_cart` | Unknown cart → 404 `cart_not_found`. |
+| `test_cart_of_another_user` | Another user's cart → 404 `cart_not_found`. |
+| `test_unknown_payment` | Unknown payment → 404 `payment_not_found`. |
+| `test_payment_of_another_cart` | A payment of another cart → 404 `payment_not_found`. |
+
+### Mock provider end to end
+
+[tests/integration/api/test_mock_settlement.py](tests/integration/api/test_mock_settlement.py): Start a payment, then `flask mock-provider settle` (the app using the mock provider).
+
+| Test | What it tests |
+|---|---|
+| `test_accepted_charge_succeeds` | Credit and debit cards with a normal token: payment `succeeded`, cart `checked_out`. *(parametrized)* |
+| `test_declined_charge_fails_with_reason_by_card_type` | `tok_declined`: payment `failed` with "insufficient funds" (debit) or "credit limit exceeded" (credit), cart `active`. *(parametrized)* |
+| `test_settlement_goes_through_the_api_and_is_logged` | The settle command calls the webhook through the API, and that call is logged. |
+| `test_nothing_to_settle` | Without pending payments the command does nothing. |
+
+### Log endpoints
+
+[tests/integration/api/test_logs.py](tests/integration/api/test_logs.py): `GET /logs` and `GET /logs/{log_id}`.
+
+| Test | What it tests |
+|---|---|
+| `test_get_log_by_id` | 200 with the log entry, including the headers received. |
+| `test_get_log_of_an_unexpected_error_by_its_log_id` | The `log_id` of a 500 response finds the log with the traceback. |
+| `test_unknown_log` | Unknown log → 404 `log_not_found`. |
+| `test_invalid_log_id` | Log id that isn't a UUID → 422. |
+| `test_filter_by_request_id_returns_every_log_of_the_request` | `request_id` returns the request's API call, data changes and external calls. |
+| `test_filter_by_action_and_status_code` | `action` and `status_code` filters, combined. |
+| `test_filter_by_user_id_and_target` | `user_id` and `target` filters. |
+| `test_filter_by_record_id_returns_the_changes_of_a_record` | `record_id` returns every change of one record (a payment's insert and update). |
+| `test_unknown_action` | Unknown `action` → 422. |
+| `test_newest_first_with_pagination` | Newest first; `limit`, `offset` and `total` page through the results. |
+| `test_invalid_pagination` | `limit` 0 or above 200, or a negative `offset` → 422. *(parametrized)* |
+| `test_listing_is_logged_as_a_summary` | A listing is logged as `{"returned", "total"}`, not as the logs it returned. |
+| `test_get_by_id_is_logged_as_a_summary` | Reading one log is logged as `{"log_id"}`. |
+| `test_errors_of_the_log_endpoints_are_logged_in_full` | Error responses of the log endpoints are logged in full. |
+
+### Action log
+
+[tests/integration/test_action_logger.py](tests/integration/test_action_logger.py): The logger and what it records.
+
+| Test | What it tests |
+|---|---|
+| `test_action_logger_is_a_singleton` | `ActionLogger()` always returns the same instance. |
+| `test_sensitive_keys_are_masked_at_any_depth_ignoring_case` | Sensitive keys are masked in nested dicts and lists, whatever their case. |
+| `test_payload_values_are_converted_to_json` | UUIDs and other values are converted to JSON before saving. |
+| `test_api_request_is_logged_with_payloads` | An API request is logged with headers, query, body, status, response, duration and `User-Id`, with tokens masked. |
+| `test_unexpected_error_returns_500_and_is_logged` | An unexpected error returns 500 with the "Log id" message, and the log with that id has the traceback; the rolled-back change isn't logged. |
+| `test_http_errors_keep_default_handling_and_are_logged` | HTTP errors such as 404 keep Flask's handling and are logged. |
+| `test_docs_are_not_logged` | Swagger pages (`/docs`) are not logged. |
+| `test_db_changes_of_a_request_share_its_request_id` | Data changes made by a request have the request's id. |
+| `test_repository_changes_are_logged` | Create, update, soft delete and restore are logged with the values before and after. |
+| `test_update_without_real_change_is_not_logged` | An update that changes nothing isn't logged. |
+| `test_rolled_back_change_is_not_logged` | A rolled-back change isn't logged. |
+| `test_seed_logs_its_inserts` | `flask seed` logs every record it inserts. |
+| `test_external_call_is_logged` | An external call is logged with what was sent (tokens masked), what was received and the duration. |
+| `test_failed_external_call_is_logged_and_raised` | A failed external call is logged with the error, and the error is raised again. |
+
+### Versioned tables
+
+[tests/integration/test_versioning.py](tests/integration/test_versioning.py): `VersionedBaseModel` and the `*_history` tables.
+
+| Test | What it tests |
+|---|---|
+| `test_insert_writes_version_1` | Creating a cart writes history version 1 (`insert`). |
+| `test_status_change_writes_new_version` | A status change writes version 2 with the new status. |
+| `test_update_without_real_change_writes_no_history` | An update that changes nothing writes no history. |
+| `test_soft_delete_and_restore_are_recorded_as_updates` | Soft delete and restore are recorded as updates of `deleted_at`. |
+| `test_hard_delete_is_recorded` | A hard delete is recorded as the next version (`delete`). |
+| `test_rollback_discards_history` | A rolled-back change writes no history. |
+| `test_stale_update_raises_instead_of_overwriting` | Updating a row changed by someone else raises `StaleDataError` instead of overwriting it. |
+| `test_non_versioned_model_has_no_history` | Tables that aren't versioned have no history table. |
+| `test_history_table_structure` | The history table has the copied columns plus `history_id`, `operation` and `changed_at`, and no foreign keys. |
+
+### Repositories
+
+[tests/integration/test_base_repository.py](tests/integration/test_base_repository.py): `BaseRepository` CRUD and the `with` statement behaviour.
+
+| Test | What it tests |
+|---|---|
+| `test_create_returns_persisted_instance` | `create` saves the record and returns it. |
+| `test_get_by_id_returns_none_when_missing` | `get_by_id` returns None for an unknown id. |
+| `test_update_changes_only_given_fields` | `update` changes only the fields sent (PATCH). |
+| `test_update_returns_none_when_missing` | `update` returns None for an unknown id. |
+| `test_delete_is_soft` | `delete` sets `deleted_at`; the record is hidden unless `include_deleted=True`. |
+| `test_delete_returns_false_when_missing` | `delete` returns False for an unknown id. |
+| `test_restore_brings_record_back` | `restore` clears `deleted_at`. |
+| `test_restore_returns_none_when_missing` | `restore` returns None for an unknown id. |
+| `test_email_can_be_reused_after_soft_delete` | A soft-deleted user's email can be used again. |
+| `test_context_manager_rolls_back_on_error` | An error inside the `with` block rolls back. |
+| `test_context_manager_closes_session` | Leaving the `with` block closes the session. |
+| `test_nested_repositories_share_the_transaction` | Nested `with` blocks share one transaction; only the outermost commits and closes. |
+| `test_error_in_nested_repository_rolls_back_everything` | An error in a nested block rolls back the whole transaction. |
+
+### Base model
+
+[tests/integration/test_base_model.py](tests/integration/test_base_model.py): Columns every table gets from `BaseModel`.
+
+| Test | What it tests |
+|---|---|
+| `test_insert_sets_id_and_timestamps` | Insert sets the UUID `id`, `created_at` and `updated_at`. |
+| `test_update_refreshes_updated_at` | An update refreshes `updated_at` and keeps `created_at`. |
+| `test_soft_delete_and_restore` | `soft_delete()` and `restore()` set and clear `deleted_at`. |
+
+### Seed
+
+[tests/integration/test_seed.py](tests/integration/test_seed.py): The `flask seed` command.
+
+| Test | What it tests |
+|---|---|
+| `test_seed_inserts_sample_data` | Inserts all the sample data. |
+| `test_seed_skips_existing_records` | Running it again inserts nothing. |
+| `test_seed_skips_soft_deleted_records` | Soft-deleted sample records are not inserted again. |
+
+### API documentation
+
+[tests/integration/test_docs.py](tests/integration/test_docs.py): Swagger and the OpenAPI spec.
+
+| Test | What it tests |
+|---|---|
+| `test_docs_serves_swagger_ui` | `/docs/` serves the Swagger UI. |
+| `test_docs_without_trailing_slash_redirects_to_swagger` | `/docs` leads to the Swagger UI. |
+| `test_openapi_spec_is_served` | `/docs/openapi.json` serves the spec. |
 
 ## Stack
 
@@ -172,7 +378,7 @@ With the app running, open http://localhost:5000/docs for the Swagger UI. The Op
 | `GET /logs` | Searches the action log, newest first. Optional filters: `request_id`, `action`, `user_id`, `target`, `record_id`, `status_code`; pagination with `limit` (1-200, default 50) and `offset`. |
 | `GET /logs/{log_id}` | One log entry, e.g. the `log_id` of an unexpected error response. |
 
-Business errors return `{"error": "<code>", "message": "<text>"}` (e.g. `cart_not_active`, `insufficient_stock`); invalid input returns 422. The flows are drawn in [docs/diagrams/](docs/diagrams/) (PlantUML), and every error, with how to trigger it, is in [docs/manual-testing.md](docs/manual-testing.md).
+Business errors return `{"error": "<code>", "message": "<text>"}` (e.g. `cart_not_active`, `insufficient_stock`); invalid input returns 422. The flows are drawn in [docs/diagrams/](docs/diagrams/) (see [Flowcharts](#flowcharts)), and every error, with how to trigger it, is in [docs/manual-testing.md](docs/manual-testing.md).
 
 **Trying it.** After `flask seed`, Alice (`User-Id: 11111111-1111-1111-1111-111111111111`) has an active cart (`c1c1c1c1-c1c1-c1c1-c1c1-c1c1c1c1c1c1`) and one card per outcome of the mock provider:
 
