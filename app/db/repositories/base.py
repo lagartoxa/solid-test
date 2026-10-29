@@ -165,7 +165,7 @@ class BaseRepository(
         return instance
 
     def get_by_id(
-        self, id: uuid.UUID, include_deleted: bool = False
+        self, id: uuid.UUID, include_deleted: bool = False, for_update: bool = False
     ) -> Optional[ModelType]:
         """
         Get a single record by primary key.
@@ -173,11 +173,16 @@ class BaseRepository(
         Args:
             id: Primary key
             include_deleted: If True, include soft-deleted records
+            for_update: If True, lock the row until the transaction ends
+                (SELECT ... FOR UPDATE), so concurrent requests wait
 
         Returns:
             Model instance or None if not found
         """
         query = self._query(include_deleted).where(self.model_class.id == id)
+
+        if for_update:
+            query = query.with_for_update()
 
         return self.session.scalars(query).first()
 

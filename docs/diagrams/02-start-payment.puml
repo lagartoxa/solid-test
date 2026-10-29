@@ -1,0 +1,104 @@
+@startuml start-payment
+title POST /carts/{cart_id}/payments - start a payment
+
+start
+:Receive request
+header: User-Id
+body: payment_method_id;
+
+if (User-Id / payment_method_id missing\nor invalid - cart_id, User-Id and\npayment_method_id must be UUIDs?) then (yes)
+  :422 Unprocessable Entity; <<#pink>>
+  stop
+endif
+
+:Lock the cart (SELECT ... FOR UPDATE);
+if (User missing/deleted, cart missing/deleted\nor cart not owned by User-Id?) then (yes)
+  :404 Not Found; <<#pink>>
+  stop
+endif
+
+if (Cart status is not **active**?\nchecked_out or abandoned) then (yes)
+  :409 Conflict; <<#pink>>
+  stop
+endif
+
+if (Cart already has a **pending**\nor **succeeded** payment?) then (yes)
+  :409 Conflict; <<#pink>>
+  note right
+    Also protects against duplicate
+    requests (double click, network
+    retry): no double charge.
+  end note
+  stop
+endif
+
+if (User has no payment method, or\npayment_method_id is missing/deleted/\nnot the user's?) then (yes)
+  :409 Conflict; <<#pink>>
+  stop
+endif
+
+:Get line items (quantity, unit_price)
+from the total calculation service
+//(external call, logged)//;
+
+if (Cart is empty?) then (yes)
+  :409 Conflict; <<#pink>>
+  stop
+endif
+
+if (A product in the cart is soft-deleted?) then (yes)
+  :409 Conflict; <<#pink>>
+  stop
+endif
+
+if (Products in different currencies?) then (yes)
+  :409 Conflict; <<#pink>>
+  stop
+endif
+
+:Lock the products (SELECT ... FOR UPDATE);
+if (Not enough stock for any item?) then (yes)
+  :409 Conflict; <<#pink>>
+  stop
+endif
+
+:amount = sum(quantity x unit_price);
+:Reserve stock (reduce stock_quantity);
+:Save payment as **pending**
+(amount, currency);
+:Commit;
+
+:Call the payment provider to start the charge
+(provider_token, amount, currency, payment id)
+//(external call, logged)//;
+
+switch (Provider answer?)
+case (accepted)
+  :Save provider_transaction_id;
+  :202 Accepted
+  (payment **pending**); <<#palegreen>>
+  stop
+case (refused the charge\ne.g. invalid card token)
+  :Payment -> **failed** (with reason);
+  :Give the reserved stock back;
+  note right: Cart stays **active**: the user\ncan retry with another method
+  :402 Payment Required
+  (payment **failed**); <<#pink>>
+  stop
+case (unreachable, timeout\nor error)
+  :Payment -> **failed** (with reason);
+  :Give the reserved stock back;
+  note right: Cart stays **active**:\nthe user can retry later
+  :502 Bad Gateway
+  (payment **failed**); <<#pink>>
+  stop
+endswitch
+
+legend bottom
+  A concurrent change of the same cart (StaleDataError) or a
+  second active payment for the cart (partial unique index)
+  also ends in 409 Conflict.
+  Any other unexpected error: rollback and 500 with
+  "An unexpected error happened. Log id: <request_id>/<log_id>".
+endlegend
+@enduml

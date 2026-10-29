@@ -11,7 +11,8 @@ This module provides:
 
 import uuid
 from datetime import datetime, timezone
-from typing import Optional
+from enum import Enum
+from typing import Iterable, Optional
 
 from sqlalchemy import (
     BigInteger,
@@ -31,6 +32,34 @@ from sqlalchemy.ext.hybrid import hybrid_property
 from sqlalchemy.orm import DeclarativeBase, Mapped, declared_attr, mapped_column
 
 from app.db.constants import ChangeOperation
+
+def sql_values(members: Iterable[Enum]) -> str:
+    """
+    Enum values as a SQL list, e.g. "'pending', 'succeeded'".
+
+    Args:
+        members: Enum members
+
+    Returns:
+        Comma-separated quoted values
+    """
+    return ", ".join(f"'{member.value}'" for member in members)
+
+
+def enum_check(column: str, enum: type[Enum], name: str) -> CheckConstraint:
+    """
+    CHECK constraint that limits a column to the values of an enum.
+
+    Args:
+        column: Column name
+        enum: Enum with the allowed values
+        name: Constraint name
+
+    Returns:
+        CHECK constraint, e.g. "status IN ('active', 'checked_out')"
+    """
+    return CheckConstraint(f"{column} IN ({sql_values(enum)})", name=name)
+
 
 # Columns of a versioned table that are not copied to its history table:
 # changed_at in the history row already says when the change happened.
@@ -199,7 +228,6 @@ def _create_history_class(model: type[VersionedBaseModel]) -> type[Base]:
         History ORM class
     """
     table_name = f"{model.__tablename__}_history"
-    operations = ", ".join(f"'{operation.value}'" for operation in ChangeOperation)
 
     copied_columns = [
         Column(column.name, column.type, nullable=column.nullable)
@@ -220,7 +248,7 @@ def _create_history_class(model: type[VersionedBaseModel]) -> type[Base]:
             server_default=func.clock_timestamp(),
         ),
         UniqueConstraint("id", "version", name=f"uq_{table_name}_id_version"),
-        CheckConstraint(f"operation IN ({operations})", name=f"{table_name}_operation_check"),
+        enum_check("operation", ChangeOperation, f"{table_name}_operation_check"),
     )
 
     return type(f"{model.__name__}History", (Base,), {"__table__": table})

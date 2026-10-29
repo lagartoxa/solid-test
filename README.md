@@ -2,14 +2,12 @@
 
 Payment part of an online shop: a SQL schema for payments and an HTTP endpoint that starts the payment for a cart. The task is described in [instructions.md](instructions.md).
 
-> Status: project structure only (database, models, repositories, migrations and tests setup). The payments table and the endpoint are not built yet.
-
 ## Stack
 
 - Python 3.10+, Flask, SQLAlchemy 2
 - PostgreSQL 16 (Docker)
 - Alembic for migrations
-- Pydantic for repository input schemas
+- Pydantic for API request/response schemas and repository input
 - flask-openapi3 for the OpenAPI spec and the Swagger UI
 - pytest
 
@@ -19,21 +17,23 @@ Payment part of an online shop: a SQL schema for payments and an HTTP endpoint t
 app/
 ├── __init__.py          # create_app() factory
 ├── config.py            # settings from environment variables (.env)
-├── cli.py               # `flask seed` command
+├── cli.py               # `flask seed` and `flask mock-provider settle` commands
 ├── log/                 # action logger (singleton) and API request logging
 ├── db/
 │   ├── session.py       # engine and one session per request
 │   ├── constants/       # enums used by the models (e.g. CartStatus)
 │   ├── models/          # SQLAlchemy models; base.py has BaseModel
 │   └── repositories/    # CRUD layer; base.py has BaseRepository
-├── schemas/             # Pydantic schemas used as repository input
-├── api/                 # HTTP endpoints (to do)
-└── services/            # business logic and payment provider mock (to do)
+├── schemas/             # Pydantic schemas: API input/responses and repository input
+├── api/                 # HTTP endpoints and error responses
+└── services/            # payment service, payment provider (mock), total calculation (stub)
 alembic/                 # migrations
 tests/
 ├── conftest.py          # database and app fixtures
+├── factories.py         # test data factories, request helpers and assertions
 ├── unit/
 └── integration/
+    └── api/             # one test file per endpoint (+ the mock settlement end to end)
 docker/postgres/         # database init script (creates the test database)
 requirements/
 ├── base.txt             # runtime dependencies
@@ -69,6 +69,35 @@ cp .env.example .env
 
 With the app running, open http://localhost:5000/docs for the Swagger UI. The OpenAPI spec is at http://localhost:5000/docs/openapi.json.
 
+## Using the payment API
+
+| Endpoint | What it does |
+|---|---|
+| `POST /carts/{cart_id}/payments` | Starts the payment of a cart. Header `User-Id`, body `{"payment_method_id": ...}`. Returns 202 with the `pending` payment. |
+| `GET /carts/{cart_id}/payments/{payment_id}` | Reads the payment and its status (`pending`, `succeeded` or `failed`). Header `User-Id`. |
+| `POST /payments/webhook` | Called by the payment provider with the result of a charge. Signed with the `X-Signature` header. |
+
+Business errors return `{"error": "<code>", "message": "<text>"}` (e.g. `cart_not_active`, `insufficient_stock`); invalid input returns 422. The flows and every error are described in [docs/payment-requirements.md](docs/payment-requirements.md).
+
+**Trying it.** After `flask seed`, Alice (`User-Id: 11111111-1111-1111-1111-111111111111`) has an active cart (`c1c1c1c1-c1c1-c1c1-c1c1-c1c1c1c1c1c1`) and one card per outcome of the mock provider:
+
+| Payment method id | Card | Result |
+|---|---|---|
+| `11111111-2222-3333-4444-555555555555` | credit | 202, then succeeded |
+| `11111111-2222-3333-4444-666666666666` | debit | 202, then succeeded |
+| `11111111-2222-3333-4444-777777777777` | credit, `tok_refused` | 402, payment failed ("invalid card token") |
+| `11111111-2222-3333-4444-888888888888` | credit, `tok_unavailable` | 502, payment failed (provider unavailable) |
+| `11111111-2222-3333-4444-999999999999` | credit, `tok_declined` | 202, then failed ("credit limit exceeded") |
+| `11111111-2222-3333-4444-aaaaaaaaaaaa` | debit, `tok_declined` | 202, then failed ("insufficient funds") |
+
+Bob (`22222222-2222-2222-2222-222222222222`) has an active cart (`c2c2c2c2-c2c2-c2c2-c2c2-c2c2c2c2c2c2`) but no payment method (409 `no_payment_method`). Carol (`33333333-3333-3333-3333-333333333333`) has an active cart and one card per failure of the provider, so failures can be tested without using up Alice's cart. Dave (`44444444-4444-4444-4444-444444444444`) has a working card and one cart per edge case (empty, checked out, abandoned, deleted, with a deleted product, mixed currencies, not enough stock). Step-by-step instructions: [docs/manual-testing.md](docs/manual-testing.md).
+
+The provider's result arrives later. To send it, run the mock provider's settle command; it calls the webhook (signed, through the API) for every pending charge:
+
+```bash
+.venv/bin/flask mock-provider settle
+```
+
 ## How to test
 
 The database container must be running (`docker-compose up -d db`).
@@ -95,7 +124,7 @@ The tests use the `shop_test` database. They apply the Alembic migrations at the
   - To use more than one repository in the same transaction, the `with` statements are nested and share the same session. Only the outermost `with` commits or rolls back and closes the session. An error at any level rolls back everything.
   - The session is created with `expire_on_commit=False`, so the objects returned by a repository keep their values after the session is closed. Relationships that were not loaded inside the `with` block cannot be loaded after it.
   - The only code that uses the session directly is the `flask seed` command, because it only populates the database with sample data.
-- **Migrations.** Alembic manages the schema. The payments table will be added as a new migration, as `quick-start.sql` asks. The sample data is not in a migration; `flask seed` inserts it, so a production database never gets test data.
+- **Migrations.** Alembic manages the schema. The payments table was added as a new migration, as `quick-start.sql` asks. The sample data is not in a migration; `flask seed` inserts it, so a production database never gets test data.
 - **Versioned tables.** Any table can keep the full history of its changes by inheriting from `VersionedBaseModel` instead of `BaseModel` ([app/db/models/base.py](app/db/models/base.py)) and generating a migration. Each insert, update, soft delete or hard delete writes a snapshot of the row to `<table>_history`, with the version, the operation and when it happened, in the same transaction as the change. `carts` is versioned, so every cart status change is kept. **This was decided so the history can be used to debug errors later**, for example to see which states a cart went through around a failed payment. It records what changed and when, not who (see the traceability note in the assumptions).
   - The `version` column is also used for optimistic locking: updating a row that another request changed in the meantime raises an error instead of silently overwriting that change.
   - History is written by SQLAlchemy session events, so only changes made through ORM objects (as the repositories do) are recorded. Bulk `UPDATE` statements skip it and must not be used on versioned tables.
@@ -120,8 +149,22 @@ The tests use the `shop_test` database. They apply the Alembic migrations at the
 - **Provider errors when starting a charge.** If the provider refuses the charge (e.g. invalid card token), the API returns 402. If it is unreachable, times out or answers with an error, it returns 502, not 409: the request and the data were fine, a service we depend on failed. In both cases the payment is saved as failed with the reason, the reserved stock is given back and the cart stays active, so the user can retry.
 - **Payment webhook security.** The provider's notifications (`POST /payments/webhook`) must be signed with a shared secret (an HMAC of the body, secret from the configuration). Without it, anyone could call the webhook and mark a payment as paid. A missing or wrong signature returns 401.
 - **Late or repeated webhooks.** A notification for a payment that is no longer `pending` returns 409. This should be evaluated in real life: if providers resend notifications often, I would answer 200 for a repeated notification with the same status instead.
+- **Payment endpoint.**
+  - The caller is identified by the `User-Id` header, and the cart must belong to that user. In a real system this would be an authentication token; here that felt like overkill.
+  - The payment method is a required field. The API never picks one by itself (not even the default), because that decision is too critical: the UI decides which method is sent. A user without payment methods, or a method that is missing, deleted or another user's, returns 409.
+  - A cart with products in different currencies returns 409: one card charge has one currency. I took this decision because I don't see this happening in real life, but I would discuss it with the customer first.
+  - The payment is asynchronous: the POST reserves the stock, saves the payment as `pending`, starts the charge and returns 202. The result arrives later through the webhook. Succeeded: the cart becomes `checked_out`. Failed: the reserved stock is given back and the cart stays `active`, so the user can retry.
+  - The checks and the stock reservation run in one transaction, with the cart and the products locked (`SELECT ... FOR UPDATE`), and are committed before the provider is called, so the provider call never holds the locks. A partial unique index also allows only one pending or succeeded payment per cart. A concurrent change of the same cart (`StaleDataError`) or payment returns 409.
+  - All business errors have the same response shape, `{"error": "<code>", "message": "<text>"}`, with a stable code per edge case. Every edge case is logged with its code (the API log saves the response).
+  - `payments` is versioned like `carts`, so every payment status change is kept in `payments_history`.
+  - Assumption: cart items don't change while a payment is pending (cart management is outside this task); the stock given back on a failure is based on the cart items.
+- **Payment types.** A payment method is a `credit` or `debit` card (`user_payment_methods.type`, existing methods became `credit`). The payment copies the type, so it keeps the type it was charged with. The flow is the same for both; only the mock's decline reason differs.
+- **External services.** The payment provider and the payment total calculation service are interfaces (`PaymentProvider`, `TotalCalculationService`) injected into the payment service, so the real ones can replace the mock and the stub without changing it.
+  - The total calculation stub returns the cart items as line items (quantity and unit price); the payment service sums them.
+  - The mock provider decides by card token, like the test cards of real providers' sandboxes: `tok_refused` refuses when the charge starts (402), `tok_unavailable` fails (502), `tok_declined` is accepted and later fails (debit: "insufficient funds", credit: "credit limit exceeded"), any other token is accepted and later succeeds.
+  - The mock sends its results with the `flask mock-provider settle` command, which calls the webhook through the API (validated, signed and logged like a real call). Simple and easy to run during a demo; a background thread would be closer to reality but harder to test and explain.
 - **Idempotent seed.** Every sample record has a fixed id (the ids from `quick-start.sql`, plus fixed ids for the cart items, which had none). Before inserting a record, the seed checks if its id already exists, including soft-deleted rows, and skips it. Running the seed again never creates duplicates or fails.
-- **Enums in `db/constants`.** Enums such as `CartStatus` are in [app/db/constants/](app/db/constants/), not in the model files. Models, schemas and the future services import them from one place.
+- **Enums in `db/constants`.** Enums such as `CartStatus` are in [app/db/constants/](app/db/constants/), not in the model files. Models, schemas and services import them from one place. CHECK constraints are built from the enums (`enum_check`), so the allowed values are written only once.
 - **API docs with Swagger.** The app is built with `flask-openapi3`, a Flask subclass that creates the OpenAPI spec from the routes and their Pydantic schemas, so the docs always match the code. Swagger UI is served at `/docs`.
 - **Requirements split.** `requirements/base.txt` has what the app needs to run. `requirements/dev.txt` adds the test tools.
 - **Tests.** The tests use a real PostgreSQL database instead of SQLite, because the schema uses PostgreSQL features (UUID generation, partial indexes).

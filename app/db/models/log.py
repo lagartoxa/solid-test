@@ -6,14 +6,12 @@ import uuid
 from datetime import datetime
 from typing import Any, Optional
 
-from sqlalchemy import CheckConstraint, DateTime, Index, Integer, Text, Uuid, func
+from sqlalchemy import DateTime, Index, Integer, Text, Uuid, func
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.constants import LogAction
-from app.db.models.base import Base
-
-LOG_ACTIONS = ", ".join(f"'{action.value}'" for action in LogAction)
+from app.db.models.base import Base, enum_check
 
 
 class Log(Base):
@@ -28,7 +26,7 @@ class Log(Base):
 
     __tablename__ = "logs"
     __table_args__ = (
-        CheckConstraint(f"action IN ({LOG_ACTIONS})", name="logs_action_check"),
+        enum_check("action", LogAction, "logs_action_check"),
         Index("idx_logs_request_id", "request_id"),
         Index("idx_logs_created_at", "created_at"),
         Index("idx_logs_target_record_id", "target", "record_id"),

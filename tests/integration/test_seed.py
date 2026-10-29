@@ -24,7 +24,8 @@ def test_seed_skips_existing_records(app, db_session):
 
     assert result.exit_code == 0
     assert "0 records inserted" in result.output
-    assert db_session.scalar(select(func.count()).select_from(User)) == 2
+    sample_users = [record for record in sample_data() if isinstance(record, User)]
+    assert db_session.scalar(select(func.count()).select_from(User)) == len(sample_users)
 
 
 def test_seed_skips_soft_deleted_records(app, db_session):

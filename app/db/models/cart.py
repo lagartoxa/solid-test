@@ -10,7 +10,7 @@ from sqlalchemy import CheckConstraint, ForeignKey, Index, Integer, Numeric, Tex
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.constants import CartStatus
-from app.db.models.base import BaseModel, VersionedBaseModel
+from app.db.models.base import BaseModel, VersionedBaseModel, enum_check
 
 if TYPE_CHECKING:
     from app.db.models.product import Product
@@ -26,10 +26,7 @@ class Cart(VersionedBaseModel):
 
     __tablename__ = "carts"
     __table_args__ = (
-        CheckConstraint(
-            "status IN ('active', 'checked_out', 'abandoned')",
-            name="carts_status_check",
-        ),
+        enum_check("status", CartStatus, "carts_status_check"),
         Index("idx_carts_user_id", "user_id"),
     )
 

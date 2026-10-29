@@ -6,12 +6,12 @@ The project structure is done and merged: models, repositories, Alembic, `flask 
 ## 1. Explicit requirements (instructions.md)
 | # | Requirement | Status |
 |---|---|---|
-| R1 | SQL schema for the payment part, added as a **new migration** | To do |
-| R2 | HTTP endpoint that **starts** the payment for a cart | To do |
+| R1 | SQL schema for the payment part, added as a **new migration** | Done |
+| R2 | HTTP endpoint that **starts** the payment for a cart | Done |
 | R3 | Python + Flask + SQLAlchemy + PostgreSQL on the quick-start schema | Done |
-| R4 | Mock payment provider that can succeed or fail | To do (rule: see §6) |
-| R5 | Tests for the endpoint | Setup done; tests to do |
-| R6 | Git repo + README on how to run the code and the tests | Done; update at the end |
+| R4 | Mock payment provider that can succeed or fail | Done (by card token, see §6) |
+| R5 | Tests for the endpoint | Done: every edge case |
+| R6 | Git repo + README on how to run the code and the tests | Done |
 | R7 | Assumptions written in the README | Ongoing |
 
 Quality bar: no bugs, clean code and naming, DRY, KISS, every line explainable.
@@ -28,6 +28,7 @@ Quality bar: no bugs, clean code and naming, DRY, KISS, every line explainable.
   - **Signed with a shared secret** (HMAC of the body, secret from config); missing or wrong signature → **401**. **[README]**
   - A notification for a payment that is no longer `pending` (repeated or late) → **409**. **[README]** To evaluate in real life: if providers resend notifications often, answer 200 for a repeated notification with the same status.
 - Everything is documented in Swagger (flask-openapi3 + Pydantic schemas).
+- Flowcharts: [docs/diagrams/](diagrams/) (PlantUML).
 
 ## 3. Business rules (POST)
 | Situation | Response |
@@ -61,8 +62,10 @@ Quality bar: no bugs, clean code and naming, DRY, KISS, every line explainable.
 ## 5. Schema: `payments` table (new Alembic migration)
 `BaseModel` columns (id, created_at, updated_at, deleted_at), plus `cart_id` FK, `user_id` FK, `payment_method_id` FK, `amount NUMERIC(12,2) CHECK > 0`, `currency CHAR(3)`, `status` (`pending`/`succeeded`/`failed`, enum in `app/db/constants`, CHECK constraint), `provider_transaction_id` (nullable), `failure_reason` (nullable). Indexes on `cart_id` and `user_id`, and a partial unique index for one active payment per cart. Model + `PaymentRepository` + schemas, following the CLAUDE.md rules (no SQL outside repositories, nested `with` statements).
 
-## 6. Still to discuss
-- **Mock provider rule (Q5):** how the mock decides success or failure and when it calls the webhook. To be settled together with the tests.
+## 6. Mock provider (decided)
+- **Outcome by card token:** `tok_refused` → refused at start (402), `tok_unavailable` → provider error (502), `tok_declined` → accepted, then failed (debit: "insufficient funds", credit: "credit limit exceeded"), any other token → accepted, then succeeded.
+- **Results are sent by `flask mock-provider settle`**, which calls the webhook through the API for every pending charge.
+- **Payment types:** `user_payment_methods.type` (credit/debit), copied to `payments.payment_type`.
 
 ## 7. Pieces to build (after approval, in a new feature branch)
 1. Payment status enum, model, migration, repository, schemas.

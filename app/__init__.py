@@ -4,6 +4,7 @@ Flask application factory.
 
 from flask_openapi3 import Info, OpenAPI
 
+from app.api import register_api
 from app.cli import register_cli
 from app.config import Config
 from app.db.session import init_db
@@ -30,6 +31,7 @@ def create_app(config: type[Config] = Config) -> OpenAPI:
 
     init_db(app)
     register_request_logging(app)
+    register_api(app)
     register_cli(app)
     _serve_swagger_on_docs_index(app)
 
