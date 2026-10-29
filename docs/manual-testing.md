@@ -4,15 +4,13 @@ How to try the payment API by hand, with Swagger and the sample data from `flask
 
 ## Before you start
 
-1. Start the database, create the tables and insert the sample data (see [How to run](../README.md#how-to-run)):
+1. Clear the database, create the tables and insert the sample data (see [How to run](../README.md#how-to-run)):
    ```bash
-   docker-compose up -d db
-   .venv/bin/alembic upgrade head
-   .venv/bin/flask seed
+   ./dev.sh reset-db
    ```
-2. Run the app:
+2. Run the app (leave it running, and use another terminal for the other commands):
    ```bash
-   .venv/bin/flask run
+   ./dev.sh run
    ```
 3. Open Swagger at http://localhost:5000/docs. For each call: open the endpoint, click **Try it out**, fill in the fields and click **Execute**.
 
@@ -47,7 +45,7 @@ A successful payment checks the cart out, so the happy path can be run once per 
 The payment is asynchronous. The POST only starts it; the payment provider reports the result later by calling our webhook (`POST /payments/webhook`). In these tests the provider is a mock, and this command plays it:
 
 ```bash
-.venv/bin/flask mock-provider settle
+./dev.sh settle
 ```
 
 It calls the webhook, signed and through the API, for **every** pending payment, and prints one line per payment (`<payment_id>: succeeded -> HTTP 200`).
@@ -69,7 +67,7 @@ It calls the webhook, signed and through the API, for **every** pending payment,
 
    > Use the payment id (the `id` returned by step 1), not the payment method id. With the payment method id the API answers 404 `payment_not_found`.
 
-3. **The provider sends the result:** run `.venv/bin/flask mock-provider settle`.
+3. **The provider sends the result:** run `./dev.sh settle`.
 
 4. **Read the status again**, as in step 2.
 
@@ -105,7 +103,7 @@ Expected: **502 Bad Gateway**, `"error": "provider_unavailable"`. The payment is
 
    Expected: **409** `active_payment_exists`. A cart can't have two pending or succeeded payments, so a double click can't charge twice.
 
-3. Run `.venv/bin/flask mock-provider settle`, then `GET /carts/{cart_id}/payments/{payment_id}`.
+3. Run `./dev.sh settle`, then `GET /carts/{cart_id}/payments/{payment_id}`.
 
    Expected: **200**, `"status": "failed"`, `"failure_reason": "credit limit exceeded"` (debit card: "insufficient funds"). The cart is still `active`.
 
@@ -159,7 +157,7 @@ Only the payment provider calls `POST /payments/webhook`, and every call must be
 | No signature | any body, `X-Signature` empty | 401 `invalid_signature` |
 | Wrong signature | any body, `X-Signature`: `abc` | 401 `invalid_signature` |
 
-The signed cases use `flask mock-provider settle` (see above) or curl. With the app running, replace the payment id and transaction id with those of a **pending** payment:
+The signed cases use `./dev.sh settle` (see above) or curl. With the app running, replace the payment id and transaction id with those of a **pending** payment:
 
 ```bash
 BODY='{"payment_id": "<payment id>", "provider_transaction_id": "<provider_transaction_id>", "status": "succeeded", "failure_reason": null}'
@@ -183,10 +181,10 @@ The signature covers the exact body: recompute `SIGNATURE` every time `BODY` cha
 
 ## Start over
 
-The happy path checks out Alice's cart, and `flask seed` doesn't reset existing records. To run it again, recreate the dev database (this deletes all dev data, including the logs):
+The happy path checks out Alice's cart. To run it again, clear the database and insert the sample data again (this deletes all data, including the logs):
 
 ```bash
-.venv/bin/alembic downgrade base && .venv/bin/alembic upgrade head && .venv/bin/flask seed
+./dev.sh reset-db
 ```
 
 ## Where to look

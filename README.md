@@ -35,6 +35,9 @@ tests/
 └── integration/
     └── api/             # one test file per endpoint (+ the mock settlement end to end)
 docker/postgres/         # database init script (creates the test database)
+docker-compose.yml       # PostgreSQL and the app
+Dockerfile               # image of the app (also runs the tests)
+dev.sh                   # reset-db, run, test, settle and down commands
 requirements/
 ├── base.txt             # runtime dependencies
 └── dev.txt              # base + test dependencies
@@ -42,25 +45,41 @@ requirements/
 
 ## How to run
 
-Requirements: Python 3.10+, Docker and docker-compose.
+Requirements: Docker with Docker Compose (`docker compose` or `docker-compose`) and bash. Everything runs in containers: the API, PostgreSQL and the tests.
 
 ```bash
-# 1. Start PostgreSQL (creates the `shop` and `shop_test` databases)
-docker-compose up -d db
+# 1. Clear the database, create the tables and insert the sample data
+./dev.sh reset-db
 
-# 2. Create the virtual environment and install the dependencies
+# 2. Run the API at http://localhost:5000 (Swagger at http://localhost:5000/docs); Ctrl+C stops it
+./dev.sh run
+
+# 3. Run the automated tests
+./dev.sh test
+```
+
+Other commands:
+
+| Command | What it does |
+|---|---|
+| `./dev.sh settle` | The mock payment provider sends the result of every pending payment (see [Using the payment API](#using-the-payment-api)) |
+| `./dev.sh down` | Stops the containers; the data is kept |
+
+Ports 5000 (API) and 5432 (PostgreSQL) must be free. `./dev.sh reset-db` deletes all the data, so run it again whenever you want to start the tests from scratch.
+
+### Without Docker for the app
+
+To run the app and the tests directly with Python 3.10+ (PostgreSQL still runs in Docker):
+
+```bash
+docker-compose up -d db
 python3 -m venv .venv
 .venv/bin/pip install -r requirements/dev.txt
-
-# 3. Configure the environment
 cp .env.example .env
-
-# 4. Create the tables and insert the sample data
 .venv/bin/alembic upgrade head
 .venv/bin/flask seed
-
-# 5. Run the app
-.venv/bin/flask run
+.venv/bin/flask run          # the API
+.venv/bin/pytest             # the tests
 ```
 
 `flask seed` can run more than once. It inserts only the sample records that are not in the database yet.
@@ -77,7 +96,7 @@ With the app running, open http://localhost:5000/docs for the Swagger UI. The Op
 | `GET /carts/{cart_id}/payments/{payment_id}` | Reads the payment and its status (`pending`, `succeeded` or `failed`). Header `User-Id`. |
 | `POST /payments/webhook` | Called by the payment provider with the result of a charge. Signed with the `X-Signature` header. |
 
-Business errors return `{"error": "<code>", "message": "<text>"}` (e.g. `cart_not_active`, `insufficient_stock`); invalid input returns 422. The flows and every error are described in [docs/payment-requirements.md](docs/payment-requirements.md).
+Business errors return `{"error": "<code>", "message": "<text>"}` (e.g. `cart_not_active`, `insufficient_stock`); invalid input returns 422. The flows are drawn in [docs/diagrams/](docs/diagrams/) (PlantUML), and every error, with how to trigger it, is in [docs/manual-testing.md](docs/manual-testing.md).
 
 **Trying it.** After `flask seed`, Alice (`User-Id: 11111111-1111-1111-1111-111111111111`) has an active cart (`c1c1c1c1-c1c1-c1c1-c1c1-c1c1c1c1c1c1`) and one card per outcome of the mock provider:
 
@@ -95,17 +114,18 @@ Bob (`22222222-2222-2222-2222-222222222222`) has an active cart (`c2c2c2c2-c2c2-
 The provider's result arrives later. To send it, run the mock provider's settle command; it calls the webhook (signed, through the API) for every pending charge:
 
 ```bash
-.venv/bin/flask mock-provider settle
+./dev.sh settle
 ```
 
 ## How to test
 
-The database container must be running (`docker-compose up -d db`).
-
 ```bash
-.venv/bin/pytest
-.venv/bin/pytest --cov=app    # with coverage
+./dev.sh test
 ```
+
+Without Docker for the app (see above): `.venv/bin/pytest`, or `.venv/bin/pytest --cov=app` for coverage.
+
+To test the API by hand with Swagger, step by step for the happy path and every edge case, see [docs/manual-testing.md](docs/manual-testing.md).
 
 The tests use the `shop_test` database. They apply the Alembic migrations at the start, so the tests always check the real schema, and remove the tables at the end. Each test runs inside a transaction that is rolled back, so tests do not share data.
 
@@ -166,6 +186,7 @@ The tests use the `shop_test` database. They apply the Alembic migrations at the
 - **Idempotent seed.** Every sample record has a fixed id (the ids from `quick-start.sql`, plus fixed ids for the cart items, which had none). Before inserting a record, the seed checks if its id already exists, including soft-deleted rows, and skips it. Running the seed again never creates duplicates or fails.
 - **Enums in `db/constants`.** Enums such as `CartStatus` are in [app/db/constants/](app/db/constants/), not in the model files. Models, schemas and services import them from one place. CHECK constraints are built from the enums (`enum_check`), so the allowed values are written only once.
 - **API docs with Swagger.** The app is built with `flask-openapi3`, a Flask subclass that creates the OpenAPI spec from the routes and their Pydantic schemas, so the docs always match the code. Swagger UI is served at `/docs`.
+- **Docker for the evaluation.** The API, PostgreSQL and the tests run in containers, so trying the project only needs Docker. `dev.sh` wraps the Docker Compose commands (`reset-db`, `run`, `test`, `settle`, `down`) and works with both Compose v1 and v2. Nothing is automatic on start: the database is cleared and filled only by `./dev.sh reset-db`, so a restart never changes the data during a test. The app runs on Flask's development server, which is enough for an evaluation; production would use a WSGI server (e.g. gunicorn).
 - **Requirements split.** `requirements/base.txt` has what the app needs to run. `requirements/dev.txt` adds the test tools.
 - **Tests.** The tests use a real PostgreSQL database instead of SQLite, because the schema uses PostgreSQL features (UUID generation, partial indexes).
 - **Commit messages as versioning documents.** Every commit message is written so it can be reused later in a versioning document (changelog / release notes): a short imperative subject line saying what changed, and a body with what changed and why, the schema or user-visible impact, and any new migration, config or dependency. The tests must all pass before a commit is made.

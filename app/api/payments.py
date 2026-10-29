@@ -1,6 +1,6 @@
 """
 Payment endpoints: start a payment, read its status and receive the
-provider's result (webhook). See docs/payment-requirements.md.
+provider's result (webhook). The flows are drawn in docs/diagrams.
 """
 
 from http import HTTPStatus
