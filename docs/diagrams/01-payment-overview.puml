@@ -1,0 +1,78 @@
+@startuml payment-overview
+title Payment overview - happy path and retry after a failed payment
+
+|Client (UI)|
+start
+:User chooses a payment method
+and confirms the cart;
+:POST /carts/{cart_id}/payments
+header: User-Id
+body: payment_method_id;
+
+|API|
+:Validate request, cart, payment method,
+line items and stock
+(see 02-start-payment);
+:Reserve stock and save payment
+as **pending**;
+:Start the charge at the provider;
+
+|Payment provider (mock)|
+if (Charge request accepted?) then (yes)
+  |API|
+  :Respond **202 Accepted**
+  with the pending payment;
+else (no)
+  |API|
+  :Payment -> **failed** (with reason)
+  Reserved stock is given back
+  Cart stays **active**;
+  :Respond with an error:
+  **402** charge refused (e.g. invalid card)
+  **502** provider unreachable or failed;
+  |Client (UI)|
+  :Show the error;
+  :User can retry or change
+  the payment method;
+  stop
+endif
+
+|Client (UI)|
+repeat
+  :GET /carts/{cart_id}/payments/{payment_id}
+  (see 04-get-payment-status);
+repeat while (status is **pending**?) is (yes) not (no)
+
+|Payment provider (mock)|
+:Process the charge;
+:POST /payments/webhook
+(signed with the shared secret);
+
+|API|
+:Apply the result
+(see 03-payment-webhook);
+if (result?) then (succeeded)
+  :Payment -> **succeeded**
+  Cart -> **checked_out**;
+else (failed)
+  :Payment -> **failed** (with reason)
+  Reserved stock is given back
+  Cart stays **active**;
+endif
+
+|Client (UI)|
+if (payment status?) then (succeeded)
+  :Show order confirmation;
+  stop
+else (failed)
+  :Show failure reason;
+  :User can retry (same or
+  other payment method);
+  stop
+endif
+
+legend bottom
+  Every request, database change and external call is saved
+  in the logs table; every cart change is kept in carts_history.
+endlegend
+@enduml

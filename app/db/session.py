@@ -10,6 +10,9 @@ from flask import Flask, current_app, g
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 
+# Registers the listener that writes the history of versioned models.
+from app.db.repositories import versioning  # noqa: F401
+
 
 def init_db(app: Flask) -> None:
     """

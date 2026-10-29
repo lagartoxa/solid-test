@@ -6,19 +6,80 @@ This module provides:
 - TimestampMixin: created_at and updated_at
 - SoftDeleteMixin: soft delete pattern with deleted_at
 - BaseModel: the class every table inherits from
+- VersionedBaseModel: BaseModel that also keeps the history of every change
 """
 
 import uuid
 from datetime import datetime, timezone
-from typing import Optional
+from enum import Enum
+from typing import Iterable, Optional
 
-from sqlalchemy import DateTime, Uuid, func
+from sqlalchemy import (
+    BigInteger,
+    CheckConstraint,
+    Column,
+    DateTime,
+    Identity,
+    Integer,
+    Table,
+    Text,
+    UniqueConstraint,
+    Uuid,
+    func,
+    inspect,
+)
 from sqlalchemy.ext.hybrid import hybrid_property
-from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+from sqlalchemy.orm import DeclarativeBase, Mapped, declared_attr, mapped_column
+
+from app.db.constants import ChangeOperation
+
+def sql_values(members: Iterable[Enum]) -> str:
+    """
+    Enum values as a SQL list, e.g. "'pending', 'succeeded'".
+
+    Args:
+        members: Enum members
+
+    Returns:
+        Comma-separated quoted values
+    """
+    return ", ".join(f"'{member.value}'" for member in members)
+
+
+def enum_check(column: str, enum: type[Enum], name: str) -> CheckConstraint:
+    """
+    CHECK constraint that limits a column to the values of an enum.
+
+    Args:
+        column: Column name
+        enum: Enum with the allowed values
+        name: Constraint name
+
+    Returns:
+        CHECK constraint, e.g. "status IN ('active', 'checked_out')"
+    """
+    return CheckConstraint(f"{column} IN ({sql_values(enum)})", name=name)
+
+
+# Columns of a versioned table that are not copied to its history table:
+# changed_at in the history row already says when the change happened.
+HISTORY_EXCLUDED_COLUMNS = {"created_at", "updated_at"}
 
 
 class Base(DeclarativeBase):
     """Base class for all models using SQLAlchemy 2.0 declarative base."""
+
+    def column_values(self) -> dict:
+        """
+        Current values of the mapped columns, keyed by attribute name.
+
+        Returns:
+            Dict of column values
+        """
+        return {
+            attribute.key: getattr(self, attribute.key)
+            for attribute in inspect(self).mapper.column_attrs
+        }
 
 
 class TimestampMixin:
@@ -101,3 +162,93 @@ class BaseModel(Base, TimestampMixin, SoftDeleteMixin):
     def __repr__(self) -> str:
         """String representation of model instance."""
         return f"<{self.__class__.__name__}(id={self.id})>"
+
+
+class VersionedBaseModel(BaseModel):
+    """
+    Base model for tables that keep the history of every change.
+
+    To version a table, inherit from this class instead of BaseModel and
+    generate a migration. Each subclass gets:
+    - version: 1 on insert, +1 on every update. It is also SQLAlchemy's
+      version_id_col, so updating a stale row raises StaleDataError instead
+      of silently overwriting a concurrent change.
+    - __history_class__: an ORM class for <tablename>_history, created
+      automatically (e.g. Cart -> CartHistory, table carts_history) when the
+      mappers are configured (app/db/models/__init__.py does it on import).
+
+    History rows are written by the listener in app/db/repositories/versioning.py.
+    """
+
+    __abstract__ = True
+
+    version: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        server_default="1",
+        sort_order=1,
+    )
+
+    @declared_attr.directive
+    def __mapper_args__(cls) -> dict:
+        """
+        Use version as the optimistic lock column.
+
+        eager_defaults loads server-generated values (e.g. the default status)
+        right after the flush, so the history snapshot has every value.
+        """
+        return {"version_id_col": cls.__table__.c.version, "eager_defaults": True}
+
+    @classmethod
+    def __declare_first__(cls) -> None:
+        """
+        Create the history class before the mappers are configured.
+
+        It can't be done when the class is defined: foreign key columns only
+        get their type once the referenced table exists, which may be defined
+        later (e.g. carts.user_id needs users).
+        """
+        cls.__history_class__ = _create_history_class(cls)
+
+
+def _create_history_class(model: type[VersionedBaseModel]) -> type[Base]:
+    """
+    Create the ORM class and table that store the history of a versioned model.
+
+    The history table copies every column of the model (except
+    HISTORY_EXCLUDED_COLUMNS) with its type and nullability, but without
+    foreign keys, unique constraints or defaults, so history rows survive
+    anything that happens to the original rows. It is append-only, so it
+    inherits Base, not BaseModel.
+
+    Args:
+        model: Mapped versioned model
+
+    Returns:
+        History ORM class
+    """
+    table_name = f"{model.__tablename__}_history"
+
+    copied_columns = [
+        Column(column.name, column.type, nullable=column.nullable)
+        for column in model.__table__.columns
+        if column.name not in HISTORY_EXCLUDED_COLUMNS
+    ]
+
+    table = Table(
+        table_name,
+        Base.metadata,
+        Column("history_id", BigInteger, Identity(), primary_key=True),
+        *copied_columns,
+        Column("operation", Text, nullable=False),
+        Column(
+            "changed_at",
+            DateTime(timezone=True),
+            nullable=False,
+            server_default=func.clock_timestamp(),
+        ),
+        UniqueConstraint("id", "version", name=f"uq_{table_name}_id_version"),
+        enum_check("operation", ChangeOperation, f"{table_name}_operation_check"),
+    )
+
+    return type(f"{model.__name__}History", (Base,), {"__table__": table})

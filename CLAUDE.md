@@ -9,6 +9,7 @@ These rules apply to every change in this repository. See [README.md](README.md)
 - Every commit message MUST be useful enough to be reused later in a versioning document (changelog / release notes):
   - Subject line: imperative, up to ~70 characters, saying what changed (e.g. `Add payments table and migration`).
   - Body: what changed and why, the user-visible or schema impact, and any new migration, config or dependency.
+- ALWAYS show the full commit message to the user and wait for their approval before committing. Apply any changes they ask for and confirm again.
 
 ## Database access
 
@@ -27,6 +28,20 @@ These rules apply to every change in this repository. See [README.md](README.md)
 - Exceptions:
   - Alembic migrations in [alembic/versions/](alembic/versions/) define the schema and may use `op.*` operations.
   - The `flask seed` command in [app/cli.py](app/cli.py) may use the session directly, because it only populates the database with sample data.
+
+## Versioned tables
+
+- To keep the history of a table, inherit from `VersionedBaseModel` instead of `BaseModel`, make its repository inherit from `VersionedBaseRepository`, and generate an Alembic migration (it creates `<table>_history`). Backfill a version 1 history row for existing records in that migration.
+- Never change a versioned table with bulk statements (`session.execute(update(...))` / `delete(...)`): they skip the history. Always change ORM instances through the repository.
+- Handle `StaleDataError` where a concurrent update of a versioned record is possible; never work around it by overwriting.
+
+## Logging
+
+- The goal of the `logs` table is to track errors later. Only use the `action_logger` singleton ([app/log/action_logger.py](app/log/action_logger.py)); never create another logger or write `Log` rows directly.
+- Log EVERY database change. Repository methods that change data must call `self._log_change(...)` (`BaseRepository`'s create/update/delete/restore already do), so the log is saved in the same transaction as the change. Code outside repositories that changes data (only `flask seed`) adds `action_logger.db_change_entry(...)` itself.
+- Log every call to an external service (payment provider, total calculation service, ...) with `action_logger.external_call(...)`, including the payloads sent and received.
+- API requests and responses are logged automatically ([app/log/request_logging.py](app/log/request_logging.py)); don't add manual API logs.
+- Never log sensitive data unmasked: add new sensitive keys to `SENSITIVE_KEYS` ([app/db/constants/sensitive_keys.py](app/db/constants/sensitive_keys.py)).
 
 ## Ambiguity
 

@@ -3,39 +3,36 @@ Base repository with generic CRUD operations and context manager protocol.
 """
 
 import uuid
-from typing import Generic, List, Optional, Type, TypeVar
+from typing import Any, Generic, List, Optional, Type, TypeVar
 
 from pydantic import BaseModel as PydanticBaseModel
 from sqlalchemy import Select, select
 from sqlalchemy.orm import Session
 
-from app.db.models.base import BaseModel
+from app.db.constants import ChangeOperation
+from app.db.models.base import Base, BaseModel, VersionedBaseModel
+from app.db.repositories.transactional import TransactionalRepository
+from app.log.action_logger import action_logger
 
 ModelType = TypeVar("ModelType", bound=BaseModel)
+VersionedModelType = TypeVar("VersionedModelType", bound=VersionedBaseModel)
 CreateSchemaType = TypeVar("CreateSchemaType", bound=PydanticBaseModel)
 UpdateSchemaType = TypeVar("UpdateSchemaType", bound=PydanticBaseModel)
 
-# Keys in session.info used to share the transaction between nested repositories.
-NESTING_DEPTH_KEY = "repository_nesting_depth"
-FAILED_KEY = "repository_failed"
 
-
-class BaseRepository(Generic[ModelType, CreateSchemaType, UpdateSchemaType]):
+class BaseRepository(
+    TransactionalRepository, Generic[ModelType, CreateSchemaType, UpdateSchemaType]
+):
     """
-    Base repository implementing generic CRUD operations with context manager protocol.
+    Base repository implementing generic CRUD operations.
 
-    All repositories must inherit from this class and set the model_class attribute.
-
-    Usage:
+    All repositories must inherit from this class and set the model_class
+    attribute. Used in a with statement (see TransactionalRepository):
         with MyRepository(session) as repo:
             item = repo.create(schema)
 
-    To use more than one repository in the same transaction, nest the with
-    statements. Only the outermost one commits (or rolls back) and closes the
-    session:
-        with UserRepository(session) as users:
-            with CartRepository(session) as carts:
-                ...
+    Every method that changes data logs the change with _log_change, in the
+    same transaction as the change.
     """
 
     model_class: Type[ModelType] = None
@@ -50,41 +47,7 @@ class BaseRepository(Generic[ModelType, CreateSchemaType, UpdateSchemaType]):
         if self.model_class is None:
             raise NotImplementedError("model_class must be set in child class")
 
-        self.session = session
-
-    def __enter__(self):
-        """Context manager entry - registers one more nesting level on the session."""
-        info = self.session.info
-        info[NESTING_DEPTH_KEY] = info.get(NESTING_DEPTH_KEY, 0) + 1
-
-        return self
-
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        """
-        Context manager exit - finishes the transaction and closes the session.
-
-        Nested repositories only record a failure. The outermost one rolls back
-        if any level failed, commits otherwise, and always closes the session,
-        returning the connection to the pool.
-        """
-        info = self.session.info
-        info[NESTING_DEPTH_KEY] -= 1
-
-        if exc_type is not None:
-            info[FAILED_KEY] = True
-
-        if info[NESTING_DEPTH_KEY] > 0:
-            return False
-
-        try:
-            if info.pop(FAILED_KEY, False):
-                self.session.rollback()
-            else:
-                self.session.commit()
-        finally:
-            self.session.close()
-
-        return False
+        super().__init__(session)
 
     def create(self, schema: CreateSchemaType) -> ModelType:
         """
@@ -101,6 +64,8 @@ class BaseRepository(Generic[ModelType, CreateSchemaType, UpdateSchemaType]):
         self.session.add(instance)
         self.session.flush()
         self.session.refresh(instance)
+
+        self._log_change(instance, ChangeOperation.INSERT, after=instance.column_values())
 
         return instance
 
@@ -122,11 +87,23 @@ class BaseRepository(Generic[ModelType, CreateSchemaType, UpdateSchemaType]):
         if not instance:
             return None
 
-        for field, value in schema.model_dump(exclude_unset=True).items():
+        data = schema.model_dump(exclude_unset=True)
+        before = {field: getattr(instance, field) for field in data}
+
+        for field, value in data.items():
             setattr(instance, field, value)
 
         self.session.flush()
         self.session.refresh(instance)
+
+        changed = [field for field in data if getattr(instance, field) != before[field]]
+        if changed:
+            self._log_change(
+                instance,
+                ChangeOperation.UPDATE,
+                before={field: before[field] for field in changed},
+                after={field: getattr(instance, field) for field in changed},
+            )
 
         return instance
 
@@ -148,6 +125,13 @@ class BaseRepository(Generic[ModelType, CreateSchemaType, UpdateSchemaType]):
         instance.soft_delete()
         self.session.flush()
 
+        self._log_change(
+            instance,
+            ChangeOperation.UPDATE,
+            before={"deleted_at": None},
+            after={"deleted_at": instance.deleted_at},
+        )
+
         return True
 
     def restore(self, id: uuid.UUID) -> Optional[ModelType]:
@@ -165,15 +149,23 @@ class BaseRepository(Generic[ModelType, CreateSchemaType, UpdateSchemaType]):
         if not instance:
             return None
 
+        deleted_at = instance.deleted_at
         instance.restore()
 
         self.session.flush()
         self.session.refresh(instance)
 
+        self._log_change(
+            instance,
+            ChangeOperation.UPDATE,
+            before={"deleted_at": deleted_at},
+            after={"deleted_at": None},
+        )
+
         return instance
 
     def get_by_id(
-        self, id: uuid.UUID, include_deleted: bool = False
+        self, id: uuid.UUID, include_deleted: bool = False, for_update: bool = False
     ) -> Optional[ModelType]:
         """
         Get a single record by primary key.
@@ -181,11 +173,16 @@ class BaseRepository(Generic[ModelType, CreateSchemaType, UpdateSchemaType]):
         Args:
             id: Primary key
             include_deleted: If True, include soft-deleted records
+            for_update: If True, lock the row until the transaction ends
+                (SELECT ... FOR UPDATE), so concurrent requests wait
 
         Returns:
             Model instance or None if not found
         """
         query = self._query(include_deleted).where(self.model_class.id == id)
+
+        if for_update:
+            query = query.with_for_update()
 
         return self.session.scalars(query).first()
 
@@ -226,3 +223,60 @@ class BaseRepository(Generic[ModelType, CreateSchemaType, UpdateSchemaType]):
             query = query.where(self.model_class.deleted_at.is_(None))
 
         return query
+
+    def _log_change(
+        self,
+        instance: ModelType,
+        operation: ChangeOperation,
+        before: Optional[dict[str, Any]] = None,
+        after: Optional[dict[str, Any]] = None,
+    ) -> None:
+        """
+        Log a change of a record, in the same transaction as the change.
+
+        Every repository method that changes data must call it, so a rolled
+        back change leaves no log.
+
+        Args:
+            instance: Changed record
+            operation: Kind of change
+            before: Values before the change (changed fields only)
+            after: Values after the change (changed fields only)
+        """
+        self.session.add(
+            action_logger.db_change_entry(
+                instance.__tablename__, instance.id, operation, before, after
+            )
+        )
+
+
+class VersionedBaseRepository(
+    BaseRepository[VersionedModelType, CreateSchemaType, UpdateSchemaType]
+):
+    """
+    Base repository for versioned models - adds access to the change history.
+
+    History rows are written automatically (app/db/repositories/versioning.py);
+    this repository only reads them.
+    """
+
+    def get_history(self, id: uuid.UUID) -> List[Base]:
+        """
+        Get every recorded version of a record, oldest first.
+
+        Includes the history of soft-deleted and hard-deleted records.
+
+        Args:
+            id: Primary key of the record
+
+        Returns:
+            List of history instances ordered by version
+        """
+        history_class = self.model_class.__history_class__
+        query = (
+            select(history_class)
+            .where(history_class.id == id)
+            .order_by(history_class.version, history_class.history_id)
+        )
+
+        return list(self.session.scalars(query))

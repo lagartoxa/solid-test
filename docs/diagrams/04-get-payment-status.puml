@@ -1,0 +1,27 @@
+@startuml get-payment-status
+title GET /carts/{cart_id}/payments/{payment_id} - read the payment status
+
+start
+:Receive request
+header: User-Id;
+
+if (User-Id, cart_id or payment_id\nmissing or not a UUID?) then (yes)
+  :422 Unprocessable Entity; <<#pink>>
+  stop
+endif
+
+if (Cart missing/deleted or\nnot owned by User-Id?) then (yes)
+  :404 Not Found; <<#pink>>
+  stop
+endif
+
+if (Payment missing/deleted or\nnot a payment of this cart?) then (yes)
+  :404 Not Found; <<#pink>>
+  stop
+endif
+
+:200 OK
+(payment with status pending / succeeded / failed,
+amount, currency, failure_reason); <<#palegreen>>
+stop
+@enduml

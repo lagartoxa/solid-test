@@ -1,0 +1,57 @@
+@startuml payment-webhook
+title POST /payments/webhook - the provider reports the result
+
+start
+:Receive notification from the provider
+body: payment_id, provider_transaction_id,
+status (succeeded | failed), failure_reason;
+
+if (Signature header missing or does not match\nthe HMAC of the body with the shared secret?) then (yes)
+  :401 Unauthorized; <<#pink>>
+  stop
+endif
+
+if (Body invalid - missing fields,\nunknown status, bad UUID?) then (yes)
+  :422 Unprocessable Entity; <<#pink>>
+  stop
+endif
+
+:Lock the payment (SELECT ... FOR UPDATE);
+if (Payment not found?) then (yes)
+  :404 Not Found; <<#pink>>
+  stop
+endif
+
+if (Payment is not **pending**?\nalready succeeded or failed) then (yes)
+  :409 Conflict; <<#pink>>
+  note right
+    Also for repeated or late notifications.
+    To evaluate in real life: if providers
+    resend often, answer 200 for a repeated
+    notification with the same status.
+  end note
+  stop
+endif
+
+if (status?) then (succeeded)
+  :Payment -> **succeeded**
+  (save provider_transaction_id);
+  :Cart -> **checked_out**
+  //(recorded in carts_history)//;
+else (failed)
+  :Payment -> **failed**
+  (save failure_reason);
+  :Lock the products and give
+  the reserved stock back;
+  :Cart stays **active**
+  (the user can retry);
+endif
+:Commit;
+:200 OK; <<#palegreen>>
+stop
+
+legend bottom
+  A concurrent change of the same cart (StaleDataError)
+  ends in 409; the provider can resend the notification.
+endlegend
+@enduml
