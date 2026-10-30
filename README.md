@@ -2,6 +2,22 @@
 
 Payment part of an online shop: a SQL schema for payments and an HTTP endpoint that starts the payment for a cart. The task is described in [instructions.md](instructions.md).
 
+## Quick start
+
+You only need Docker and bash. Ports 5000 and 5432 must be free.
+
+| Command | What it does |
+|---|---|
+| `./dev.sh reset-db` | Clears the database, creates the tables and fills them with the sample data. Run it once before the first start, and again whenever you want to start over. |
+| `./dev.sh run` | Runs the API at http://localhost:5000. Open http://localhost:5000/docs to try it with Swagger. Ctrl+C stops it. |
+| `./dev.sh test` | Runs the automated tests. |
+| `./dev.sh settle` | Plays the payment provider: sends the result of every pending payment. |
+| `./dev.sh down` | Stops the containers. The data is kept. |
+
+**When to use `settle`.** Payments are asynchronous: starting a payment only returns `pending`, and the payment provider sends the result later, by calling the API's webhook. The provider here is a mock, so nothing happens until you run `./dev.sh settle`, in another terminal while the API is running. Use it after starting a payment, when you want to see the payment become `succeeded` (and the cart `checked_out`) or `failed`. It settles every pending payment at once.
+
+Step-by-step tests with Swagger, accessible by the URL /docs for the happy path and every edge case: [docs/manual-testing.md](docs/manual-testing.md). More details: [How to run](#how-to-run).
+
 ## My Assumptions
 
 Since no instructions told otherwise, I assumed I could use AI for the task, so I used Claude. I really don't remember if we agreed on something different at the meeting. If so, I apologise and I can do the task again without AI.

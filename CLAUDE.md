@@ -5,7 +5,7 @@ These rules apply to every change in this repository. See [README.md](README.md)
 ## Commits
 
 - Only commit when SPECIFICALLY ASKED. Finishing a task is not a request to commit.
-- Before every commit, run the full test suite (`.venv/bin/pytest`). If ANY test fails, stop: do not commit, and report the failing tests.
+- Before every commit, run the full test suite with `./dev.sh test` (it starts the database and runs the tests in Docker, exactly as the evaluator will). If ANY test fails, stop: do not commit, and report the failing tests.
 - Every commit message MUST be useful enough to be reused later in a versioning document (changelog / release notes):
   - Subject line: imperative, up to ~70 characters, saying what changed (e.g. `Add payments table and migration`).
   - Body: what changed and why, the user-visible or schema impact, and any new migration, config or dependency.
